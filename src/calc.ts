@@ -19,6 +19,8 @@ import {
   SPECIAL_FACTOR_MAP,
   WEEK_MAP,
   WEEKS,
+  emptyChannelDecision,
+  emptyWeekDecision,
   priceMax,
   priceMin,
   resolveChannelSim,
@@ -28,17 +30,32 @@ import {
   resolveTotalRooms,
 } from './domain';
 
-function factorMultiplier(specialFactors: string[]): number {
+// A saved payload may legitimately be partial: save_week merges one week at a
+// time, so a group that only saved drafts for wk2/wk3 has a payload with just
+// those weeks. Every reader below must tolerate missing weeks/channels/room
+// types instead of crashing the whole screen.
+function fallbackRoomTypeDecision() {
+  return {
+    price: null,
+    quota: null,
+    weekend_pricing_enabled: false,
+    weekend_days: [] as number[],
+    weekday_price: null,
+    weekend_price: null,
+  };
+}
+
+function factorMultiplier(specialFactors?: string[] | null): number {
   let m = 1;
-  for (const key of specialFactors) {
+  for (const key of specialFactors ?? []) {
     const f = SPECIAL_FACTOR_MAP[key];
     if (f) m *= f.demandMultiplier;
   }
   return m;
 }
 
-function hasActiveSpecialFactors(specialFactors: string[]): boolean {
-  return specialFactors.some((key) => {
+function hasActiveSpecialFactors(specialFactors?: string[] | null): boolean {
+  return (specialFactors ?? []).some((key) => {
     const f = SPECIAL_FACTOR_MAP[key];
     return f && f.demandMultiplier !== 1;
   });
@@ -160,13 +177,13 @@ function computeWeekTransactions(
   const week = WEEK_MAP[weekKey];
   const days = week.days;
   const totalRoomSupply = totalRoomsPerDay * days;
-  const multiplier = factorMultiplier(weekDecision.specialFactors);
+  const multiplier = factorMultiplier(weekDecision?.specialFactors);
   const rng = seededRng(hashStr(weekKey + groupId));
 
   const results: RawTransaction[] = [];
 
   for (const channel of channels) {
-    const channelDec = weekDecision.channels[channel.key];
+    const channelDec = weekDecision?.channels?.[channel.key] ?? emptyChannelDecision(roomTypes);
     const simParams = resolveChannelSimParams(channel.key, simConfig);
     const totalChannelQuota = roomTypes.reduce(
       (s, rt) => s + (channelDec.roomTypes[rt.key].quota ?? 0),
@@ -192,7 +209,7 @@ function computeWeekTransactions(
       simParams.weeklyFixedCost + totalChannelQuota * simParams.perRoomNightCost;
 
     for (const roomType of roomTypes) {
-      const rtDec = channelDec.roomTypes[roomType.key];
+      const rtDec = channelDec.roomTypes[roomType.key] ?? fallbackRoomTypeDecision();
       const quota = rtDec.quota ?? 0;
       const rtBasePrice = channel.basePrice * roomType.priceMultiplier;
 
@@ -326,9 +343,9 @@ function computeWeekResult(
     if (entry.releaseOffset <= 0) {
       // This entry is due for release this week
       const simParams = resolveChannelSimParams(entry.channelKey, simConfig);
-      const totalChannelQuota = weekDecision.channels[entry.channelKey]
+      const totalChannelQuota = weekDecision?.channels?.[entry.channelKey]
         ? roomTypes.reduce(
-            (s, rt) => s + (weekDecision.channels[entry.channelKey].roomTypes[rt.key].quota ?? 0),
+            (s, rt) => s + (weekDecision.channels[entry.channelKey]?.roomTypes?.[rt.key]?.quota ?? 0),
             0,
           ) * days
         : 0;
@@ -526,7 +543,7 @@ export function computeCycle(
     const { weekResult, newPending } = computeWeekResult(
       i,
       w.key,
-      payload.weeks[w.key],
+      payload.weeks[w.key] ?? emptyWeekDecision(channels, roomTypes),
       channels,
       roomTypes,
       totalRoomsPerDay,
@@ -579,11 +596,11 @@ export function computeCycle(
 
 export function weekQuotaTotal(weekDecision: WeekDecision, overrides?: BaseParams | null): number {
   return resolveChannels(overrides).reduce((sum, c) => {
-    const ch = weekDecision.channels[c.key];
+    const ch = weekDecision?.channels?.[c.key];
     return (
       sum +
       resolveRoomTypes(overrides).reduce(
-        (s, rt) => s + (ch.roomTypes[rt.key].quota ?? 0),
+        (s, rt) => s + (ch?.roomTypes?.[rt.key]?.quota ?? 0),
         0,
       )
     );
@@ -596,8 +613,8 @@ export function roomTypeQuotaTotal(
   overrides?: BaseParams | null,
 ): number {
   return resolveChannels(overrides).reduce((sum, c) => {
-    const ch = weekDecision.channels[c.key];
-    return sum + (ch.roomTypes[roomTypeKey].quota ?? 0);
+    const ch = weekDecision?.channels?.[c.key];
+    return sum + (ch?.roomTypes?.[roomTypeKey]?.quota ?? 0);
   }, 0);
 }
 
@@ -649,9 +666,11 @@ export function validateWeek(payload: DecisionPayload, weekKey: string, override
     }
   }
   for (const ch of channels) {
-    const cd = wd.channels[ch.key];
+    const cd = wd.channels?.[ch.key];
+    if (!cd) continue;
     for (const rt of roomTypes) {
-      const rtDec = cd.roomTypes[rt.key];
+      const rtDec = cd.roomTypes?.[rt.key];
+      if (!rtDec) continue;
       if (rtDec.weekend_pricing_enabled === true) {
         const weekendDays = rtDec.weekend_days ?? [];
         if (weekendDays.length === 0) {

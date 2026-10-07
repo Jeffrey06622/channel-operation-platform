@@ -1784,7 +1784,7 @@ function WeekForm({
         </p>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {SPECIAL_FACTORS.map((f) => {
-            const checked = weekDecision.specialFactors.includes(f.key);
+            const checked = (weekDecision.specialFactors ?? []).includes(f.key);
             const Icon = FACTOR_ICONS[f.key] || Info;
             return (
               <button
@@ -2416,14 +2416,14 @@ function HistoryReview({ payload, cycleResult, submittedWeeks, baseParams }: His
       </div>
 
       {/* Special factors applied */}
-      {weekDecision.specialFactors.length > 0 && (
+      {(weekDecision.specialFactors ?? []).length > 0 && (
         <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4">
           <div className="flex items-center gap-2 mb-2">
             <Info className="w-4 h-4 text-indigo-600" />
             <span className="text-sm font-semibold text-indigo-800">本周特殊因素</span>
           </div>
           <div className="flex flex-wrap gap-2">
-            {weekDecision.specialFactors.map((fk) => {
+            {(weekDecision.specialFactors ?? []).map((fk) => {
               const meta = SPECIAL_FACTORS.find((s) => s.key === fk);
               if (!meta) return null;
               const Icon = FACTOR_ICONS[fk] || Info;
