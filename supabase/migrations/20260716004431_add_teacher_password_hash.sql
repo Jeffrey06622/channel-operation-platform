@@ -1,0 +1,1 @@
+ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS teacher_password_hash TEXT NOT NULL DEFAULT '';

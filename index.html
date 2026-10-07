@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>酒店渠道运营决策实训平台</title>
+    <meta property="og:image" content="https://bolt.new/static/og_default.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:image" content="https://bolt.new/static/og_default.png" />
+    <script>
+      // Asset loading retry: if the main module script fails to load (network
+      // error, CDN hiccup, etc.), retry up to 3 times with exponential backoff.
+      (function () {
+        var MAX_RETRIES = 3;
+        var attempts = 0;
+        function loadMain() {
+          attempts++;
+          var script = document.createElement('script');
+          script.type = 'module';
+          script.src = '/src/main.tsx';
+          script.onerror = function () {
+            if (attempts < MAX_RETRIES) {
+              setTimeout(loadMain, Math.pow(2, attempts) * 1000);
+            } else {
+              document.getElementById('root').innerHTML =
+                '<div style="display:flex;min-height:100vh;align-items:center;justify-content:center;font-family:sans-serif;color:#64748b;text-align:center;padding:2rem">' +
+                '<div><div style="font-size:1.125rem;font-weight:600;margin-bottom:0.5rem">页面加载失败</div>' +
+                '<div>请检查网络连接后刷新页面重试</div>' +
+                '<button onclick="location.reload()" style="margin-top:1rem;padding:0.5rem 1.5rem;background:#475569;color:white;border:none;border-radius:0.5rem;cursor:pointer">刷新页面</button>' +
+                '</div></div>';
+            }
+          };
+          script.onload = function () {
+            // Successfully loaded; remove any previous failed script tags
+          };
+          document.body.appendChild(script);
+        }
+        // Only activate retry if the main script fails. The main script tag
+        // in the HTML below is the primary loader; this intercepts its failure.
+        document.addEventListener('DOMContentLoaded', function () {
+          var mainScript = document.querySelector('script[src="/src/main.tsx"]');
+          if (mainScript) {
+            mainScript.addEventListener('error', function () {
+              if (attempts < MAX_RETRIES) {
+                setTimeout(loadMain, 1000);
+              }
+            });
+          }
+        });
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
