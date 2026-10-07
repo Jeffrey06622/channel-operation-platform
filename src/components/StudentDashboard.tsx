@@ -401,6 +401,75 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
     loadData();
   }, [loadData]);
 
+  // Teacher-side changes (opening or closing a week, resetting a submission,
+  // editing the deadline) must reach an already-open student page. Previously
+  // the page read the server once on mount, so a student who left the tab open
+  // kept seeing the old week list and the old deadlines until a manual reload.
+  //
+  // Only teacher-controlled state is refreshed here. The student's own decision
+  // payload is deliberately left untouched, so an in-progress edit can never be
+  // discarded by this refresh.
+  const refreshServerState = useCallback(async () => {
+    try {
+      const [settingsRes, subRes, openRes] = await Promise.all([
+        supabaseFetch(() =>
+          supabase
+            .from('app_settings')
+            .select('current_week_key, submission_deadline, late_submit_deadline, benchmark_fiscal_year, benchmark_hotel_class')
+            .maybeSingle(),
+        ),
+        supabaseFetch(() =>
+          supabase.from('week_submissions').select('*').eq('group_id', group.id),
+        ),
+        supabaseFetch(() => supabase.from('open_weeks').select('week_key')),
+      ]);
+      // On any failure keep the current view: a refresh must never blank the page.
+      if (settingsRes.error || subRes.error || openRes.error) return;
+
+      setOpenWeekKeys(new Set((openRes.data as OpenWeekRow[] | null)?.map((r) => r.week_key) ?? []));
+
+      if (settingsRes.data) {
+        const s = settingsRes.data as AppSettingsRow;
+        setSubmissionDeadline(s.submission_deadline ?? null);
+        setLateSubmitDeadline(s.late_submit_deadline ?? null);
+        setBenchmarkFiscalYear(s.benchmark_fiscal_year ?? 2025);
+        setBenchmarkHotelClass(s.benchmark_hotel_class ?? '五星');
+      }
+
+      if (subRes.data) {
+        const subs = subRes.data as WeekSubmissionRow[];
+        setSubmittedWeeks(new Set(subs.map((r) => r.week_key)));
+        const sm = new Map<string, 'on_time' | 'late'>();
+        for (const s of subs) {
+          if (s.submission_status) sm.set(s.week_key, s.submission_status);
+        }
+        setSubmissionStatusMap(sm);
+      }
+    } catch {
+      // A failed refresh must not disturb the page; the next attempt retries.
+    }
+  }, [group.id]);
+
+  useEffect(() => {
+    let lastRefresh = 0;
+    const minIntervalMs = 30000;
+    function maybeRefresh() {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      const now = Date.now();
+      if (now - lastRefresh < minIntervalMs) return;
+      lastRefresh = now;
+      refreshServerState();
+    }
+    document.addEventListener('visibilitychange', maybeRefresh);
+    window.addEventListener('focus', maybeRefresh);
+    const timer = setInterval(maybeRefresh, 120000);
+    return () => {
+      document.removeEventListener('visibilitychange', maybeRefresh);
+      window.removeEventListener('focus', maybeRefresh);
+      clearInterval(timer);
+    };
+  }, [refreshServerState]);
+
   useEffect(() => {
     if (!toast) return;
     const t = setTimeout(() => setToast(''), 2500);
