@@ -131,6 +131,16 @@ export default function LoginScreen({ onGroupLogin, onTeacherLogin }: Props) {
       );
       if (qErr) throw qErr;
       const storedHash = data?.teacher_password_hash ?? '';
+      // Refuse outright when no hash is configured on the server. Passing an
+      // empty string to the verifier previously fell through to a default
+      // credential that is compiled into the public JS bundle — anyone can read
+      // it from the site's asset file. With no hash there is nothing legitimate
+      // to compare against, so the correct answer is "not configured".
+      if (!storedHash) {
+        setError('教师密码尚未在服务器上配置，请联系平台维护人设置');
+        setLoading(false);
+        return;
+      }
       const ok = await verifyTeacherPassword(teacherPassword, storedHash);
       if (ok) {
         onTeacherLogin();
