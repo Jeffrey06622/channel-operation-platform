@@ -37,6 +37,7 @@ import {
   ChevronDown,
   Check,
   Compass,
+  RotateCcw,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { supabase } from '../supabaseClient';
@@ -126,6 +127,11 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
   const [decisionId, setDecisionId] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
+  // Set when loading fails in a way that makes editing unsafe: without the real
+  // settings and submission state, the payload rebuild can drop saved channel
+  // data and weeks that are actually locked would look editable.
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [loadFailureDetail, setLoadFailureDetail] = useState('');
 
   // Password change
   const [showPwdModal, setShowPwdModal] = useState(false);
@@ -185,12 +191,14 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
   const decisionIdRef = useRef(decisionId);
   const activeWeekRef = useRef(activeWeek);
   const submittedWeeksRef = useRef(submittedWeeks);
+  const openWeekKeysRef = useRef(openWeekKeys);
   const serverUpdatedAtRef = useRef<string | null>(null);
   payloadRef.current = payload;
   hotelNameRef.current = hotelName;
   decisionIdRef.current = decisionId;
   activeWeekRef.current = activeWeek;
   submittedWeeksRef.current = submittedWeeks;
+  openWeekKeysRef.current = openWeekKeys;
 
   // Debounced auto-save: persists ONLY the active week's data via save_week RPC.
   // Skips on initial load, submitted weeks, and after late deadline.
@@ -200,9 +208,12 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
   useEffect(() => {
     if (skipAutoSave.current) { return; }
     if (isLateDeadlinePassed) return;
-    // Only autosave when viewing an editable (non-submitted, open) week
+    // Only autosave when viewing an editable week: open by the teacher and not
+    // yet submitted. The open-week check was missing, so a week the teacher had
+    // not opened could still be written to the server.
     const wk = activeWeekRef.current;
     if (wk === 'summary' || wk === 'history') return;
+    if (!openWeekKeysRef.current.has(wk)) return;
     if (submittedWeeksRef.current.has(wk)) return;
     // Skip if the active week's data hasn't actually changed since last save
     const weekData = payloadRef.current.weeks[wk];
@@ -213,7 +224,14 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
     setDraftStatus('saving');
     autoSaveTimer.current = setTimeout(async () => {
       try {
-        await persistDraft(wk);
+        const wrote = await persistDraft(wk);
+        // persistDraft returns false when nothing was sent (submitted week,
+        // week missing locally). Reporting "saved" in that case showed a
+        // success badge for a write that never happened.
+        if (!wrote) {
+          setDraftStatus('idle');
+          return;
+        }
         lastSavedWeekDataRef.current = serialized;
         setDraftStatus('saved');
         setTimeout(() => setDraftStatus('idle'), 1500);
@@ -223,6 +241,12 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
           setToast('网络不佳，请检查网络后重试');
         } else if (err instanceof Error && err.message.includes('CONFLICT')) {
           setToast('数据已在别处更新，请刷新页面获取最新数据');
+        } else if (err instanceof Error && err.message.includes('REJECT_EMPTY_OVERWRITE')) {
+          setToast('服务器上本周已有数据，已阻止用空数据覆盖，请刷新页面');
+        } else if (err instanceof Error && err.message.includes('SUBMITTED_WEEK_LOCKED')) {
+          setToast('本周已提交，无法修改');
+        } else {
+          setToast('保存失败：' + (err instanceof Error ? err.message : String(err)));
         }
       }
     }, 800);
@@ -267,6 +291,24 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
         supabase.from('open_weeks').select('week_key'),
       ),
     ]);
+    // Every failed read aborts the load. Supabase query builders resolve with
+    // { data: null, error } instead of throwing, so these errors previously
+    // slipped through: the page carried on with built-in defaults, which could
+    // rebuild saved channel data away and made locked weeks look editable.
+    const readFailures: string[] = [];
+    if (settingsRes.error) readFailures.push('平台设置：' + settingsRes.error.message);
+    if (decRes.error) readFailures.push('决策数据：' + decRes.error.message);
+    if (subRes.error) readFailures.push('提交记录：' + subRes.error.message);
+    if (openRes.error) readFailures.push('开放周次：' + openRes.error.message);
+    if (!settingsRes.data) readFailures.push('平台设置：未读取到配置记录');
+    if (readFailures.length > 0) {
+      setError('数据加载失败，已停止进入编辑状态以避免覆盖服务器数据');
+      setLoadFailureDetail(readFailures.join('；'));
+      setLoadFailed(true);
+      setLoading(false);
+      return;
+    }
+
     setOpenWeekKeys(new Set((openRes.data as OpenWeekRow[] | null)?.map((r) => r.week_key) ?? []));
 
     let sBaseParams: BaseParams | null = null;
@@ -283,12 +325,6 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
       setBenchmarkHotelClass(s.benchmark_hotel_class ?? '五星');
     }
 
-    if (decRes.error) {
-      setError(isNetworkError(decRes.error) ? '网络不佳，请检查网络后重试' : decRes.error.message);
-      setLoading(false);
-      return;
-    }
-
     if (decRes.data) {
       const saved = decRes.data.payload as DecisionPayload;
       const allChannels = resolveChannels(sBaseParams);
@@ -297,32 +333,36 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
       // This ensures: missing weeks get empty templates, existing weeks keep their data.
       const base = emptyDecisionPayload(allChannels, allRoomTypes);
       if (saved?.weeks) {
-        // First, copy all saved week keys that exist (including any not in static WEEKS list)
+        // Copy every saved week key, including any not in the static WEEKS list.
         for (const savedWeekKey of Object.keys(saved.weeks)) {
           const savedWeek = saved.weeks[savedWeekKey];
           if (!savedWeek) continue;
-          // Deep-merge saved data onto a fresh empty template for this week,
-          // preserving saved values while filling any new channels/room types with defaults
+          // Merge saved data onto a fresh empty template for this week.
+          //
+          // IMPORTANT: this loop iterates over the SAVED keys, not over the
+          // currently resolved channels/room types. Iterating the resolved
+          // lists meant that any saved channel or room type which is not in the
+          // current configuration (custom channel removed by the teacher, or
+          // base_params temporarily unreadable) was silently dropped from the
+          // payload — and the autosave then wrote that reduced payload back to
+          // the server, destroying the student's data for good.
           const merged = emptyWeekDecision(allChannels, allRoomTypes);
           if (savedWeek.channels) {
-            for (const ch of allChannels) {
-              const savedCh = savedWeek.channels[ch.key];
-              if (savedCh) {
-                const mergedCh = emptyChannelDecision(allRoomTypes);
-                if (savedCh.roomTypes) {
-                  for (const rt of allRoomTypes) {
-                    const savedRt = savedCh.roomTypes[rt.key];
-                    if (savedRt) {
-                      // Deep merge: start with template defaults, overwrite with saved values
-                      mergedCh.roomTypes[rt.key] = {
-                        ...mergedCh.roomTypes[rt.key],
-                        ...savedRt,
-                      };
-                    }
-                  }
+            for (const savedChKey of Object.keys(savedWeek.channels)) {
+              const savedCh = savedWeek.channels[savedChKey];
+              if (!savedCh) continue;
+              const mergedCh = merged.channels[savedChKey] ?? emptyChannelDecision(allRoomTypes);
+              if (savedCh.roomTypes) {
+                for (const savedRtKey of Object.keys(savedCh.roomTypes)) {
+                  const savedRt = savedCh.roomTypes[savedRtKey];
+                  if (!savedRt) continue;
+                  mergedCh.roomTypes[savedRtKey] = {
+                    ...(mergedCh.roomTypes[savedRtKey] ?? { price: null, quota: null }),
+                    ...savedRt,
+                  };
                 }
-                merged.channels[ch.key] = mergedCh;
               }
+              merged.channels[savedChKey] = mergedCh;
             }
           }
           merged.specialFactors = savedWeek.specialFactors ?? [];
@@ -489,17 +529,19 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
   // Saves only the specified week's data via the save_week RPC.
   // The RPC deep-merges at the database level, preventing full-payload overwrites.
   // Includes optimistic concurrency via serverUpdatedAtRef.
-  async function persistDraft(weekKey?: string) {
+  // Returns true only when a request was actually sent and accepted, so callers
+  // never report success for a write that was skipped.
+  async function persistDraft(weekKey?: string): Promise<boolean> {
     const currentPayload = payloadRef.current;
     const currentHotelName = hotelNameRef.current;
     const wk = weekKey ?? activeWeekRef.current;
-    if (wk === 'summary' || wk === 'history') return;
+    if (wk === 'summary' || wk === 'history') return false;
 
     // Never save a submitted week
-    if (submittedWeeksRef.current.has(wk)) return;
+    if (submittedWeeksRef.current.has(wk)) return false;
 
     const weekData = currentPayload.weeks[wk];
-    if (!weekData) return;
+    if (!weekData) return false;
 
     const { data: rpcResult, error: rpcErr } = await supabaseFetch(() =>
       supabase.rpc('save_week', {
@@ -522,16 +564,21 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
         decisionIdRef.current = result.decision_id;
       }
     }
+    return true;
   }
 
   async function handleSaveDraft() {
     setSaving(true);
     setError('');
     try {
-      await persistDraft();
-      setToast('草稿已保存');
+      const wrote = await persistDraft();
+      setToast(wrote ? '草稿已保存' : '当前周次不可保存（未开放或已提交）');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '保存失败');
+      if (isNetworkError(err)) {
+        setError('网络不佳，请检查网络后重试');
+      } else {
+        setError(err instanceof Error ? err.message : '保存失败');
+      }
     }
     setSaving(false);
   }
@@ -626,6 +673,44 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
       }
     }
     setSubmitting(false);
+  }
+
+  if (loadFailed) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+        <div className="max-w-lg w-full bg-white rounded-2xl shadow-lg border border-slate-200 p-8 text-center">
+          <div className="w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-4 bg-amber-100">
+            <AlertCircle className="w-7 h-7 text-amber-600" />
+          </div>
+          <h2 className="text-lg font-semibold text-slate-800 mb-2">数据加载失败</h2>
+          <p className="text-sm text-slate-500 mb-4">
+            为避免用不完整的数据覆盖你在服务器上已保存的决策，页面已停止进入编辑状态。
+          </p>
+          <p className="text-xs text-slate-500 mb-5 bg-slate-50 rounded-lg p-3 break-all text-left">
+            {loadFailureDetail}
+          </p>
+          <div className="flex gap-2.5 justify-center">
+            <button
+              onClick={() => {
+                setLoadFailed(false);
+                setLoadFailureDetail('');
+                loadData();
+              }}
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-700 text-white text-sm font-medium rounded-lg hover:bg-slate-800 transition"
+            >
+              <RotateCcw className="w-4 h-4" />
+              重新加载
+            </button>
+            <button
+              onClick={onLogout}
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-white text-slate-600 text-sm font-medium rounded-lg border border-slate-300 hover:bg-slate-50 transition"
+            >
+              退出登录
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   if (loading) {

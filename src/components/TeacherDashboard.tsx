@@ -100,6 +100,10 @@ export default function TeacherDashboard({ onLogout }: Props) {
   const [search, setSearch] = useState('');
   const [classFilter, setClassFilter] = useState('');
   const [toast, setToast] = useState('');
+  // Non-empty when one or more first-screen reads failed. A failed read is not
+  // the same as "no rows": without this the dashboard silently rendered an
+  // empty roster and the teacher could not tell the difference.
+  const [loadError, setLoadError] = useState('');
   const [activeTab, setActiveTab] = useState<Tab>('groups');
   const [selectedGroupIds, setSelectedGroupIds] = useState<Set<string>>(new Set());
   const [benchmarkFiscalYear, setBenchmarkFiscalYear] = useState(2025);
@@ -124,6 +128,21 @@ export default function TeacherDashboard({ onLogout }: Props) {
         supabaseFetch(() => supabase.from('app_settings').select('*').maybeSingle()),
         supabaseFetch(() => supabase.from('open_weeks').select('*').order('opened_at')),
       ]);
+      // Supabase query builders resolve with { data: null, error } rather than
+      // throwing, so every read must be inspected explicitly.
+      const readFailures: string[] = [];
+      if (gRes.error) readFailures.push('小组列表：' + gRes.error.message);
+      if (dRes.error) readFailures.push('决策数据：' + dRes.error.message);
+      if (subRes.error) readFailures.push('提交记录：' + subRes.error.message);
+      if (settingsRes.error) readFailures.push('平台设置：' + settingsRes.error.message);
+      if (openRes.error) readFailures.push('开放周次：' + openRes.error.message);
+      if (!settingsRes.data) readFailures.push('平台设置：未读取到配置记录');
+      if (readFailures.length > 0) {
+        setLoadError(readFailures.join('；'));
+        setLoading(false);
+        return;
+      }
+      setLoadError('');
       setGroups((gRes.data as GroupRow[]) || []);
       setDecisions((dRes.data as DecisionRow[]) || []);
       setWeekSubmissions((subRes.data as WeekSubmissionRow[]) || []);
@@ -266,9 +285,12 @@ export default function TeacherDashboard({ onLogout }: Props) {
       try {
         const text = await file.text();
         const backup = JSON.parse(text);
+        // Match on group_id only. The previous version fell back to matching by
+        // group name, so a backup taken from a different class could restore
+        // another group's data into this group whenever the names happened to
+        // coincide. Names are only unique within a class, not globally.
         const entry = (backup.groups ?? []).find(
-          (g: { group_id?: string; group_name?: string }) =>
-            g.group_id === group.id || g.group_name === group.name,
+          (g: { group_id?: string }) => g.group_id === group.id,
         );
         if (!entry || !entry.payload) {
           setToast('备份文件中未找到该小组的数据');
@@ -382,7 +404,18 @@ export default function TeacherDashboard({ onLogout }: Props) {
 
   async function handleDeleteGroup(group: GroupRow) {
     if (!confirm(`确定删除小组"${group.name}"及其所有决策数据吗？此操作不可撤销。`)) return;
-    await supabase.from('groups').delete().eq('id', group.id);
+    // .select('id') returns the deleted rows. Previously the result was never
+    // inspected, so a rejected or zero-row delete still reported success.
+    const { data: removed, error } = await supabase
+      .from('groups')
+      .delete()
+      .eq('id', group.id)
+      .select('id');
+    if (error) { setToast('删除失败：' + error.message); return; }
+    if (!removed || removed.length === 0) {
+      setToast('删除失败：服务器未删除任何记录，请刷新后重试');
+      return;
+    }
     await loadData();
     setToast('已删除小组');
   }
@@ -395,9 +428,18 @@ export default function TeacherDashboard({ onLogout }: Props) {
       .join('、');
     if (!confirm(`确定删除以下 ${selectedGroupIds.size} 个小组及其所有决策数据吗？\n\n${names}\n\n此操作不可撤销。`))
       return;
-    await supabase.from('groups').delete().in('id', [...selectedGroupIds]);
+    const { data: removed, error } = await supabase
+      .from('groups')
+      .delete()
+      .in('id', [...selectedGroupIds])
+      .select('id');
+    if (error) { setToast('删除失败：' + error.message); return; }
+    if (!removed || removed.length === 0) {
+      setToast('删除失败：服务器未删除任何记录，请刷新后重试');
+      return;
+    }
     await loadData();
-    setToast(`已删除 ${selectedGroupIds.size} 个小组`);
+    setToast(`已删除 ${removed.length} 个小组`);
     setSelectedGroupIds(new Set());
   }
 
@@ -409,12 +451,18 @@ export default function TeacherDashboard({ onLogout }: Props) {
       .join('、');
     if (!confirm(`确定将以下 ${selectedGroupIds.size} 个小组的密码重置为 000000 吗？\n\n${names}`)) return;
     const hash = await hashPassword('000000');
-    await supabase
+    const { data: updated, error } = await supabase
       .from('groups')
       .update({ password_hash: hash, password_plain: '000000' })
-      .in('id', [...selectedGroupIds]);
+      .in('id', [...selectedGroupIds])
+      .select('id');
+    if (error) { setToast('重置失败：' + error.message); return; }
+    if (!updated || updated.length === 0) {
+      setToast('重置失败：服务器未更新任何记录，请刷新后重试');
+      return;
+    }
     await loadData();
-    setToast(`已重置 ${selectedGroupIds.size} 个小组的密码`);
+    setToast(`已重置 ${updated.length} 个小组的密码`);
   }
 
   function toggleSelectGroup(id: string) {
@@ -565,6 +613,26 @@ export default function TeacherDashboard({ onLogout }: Props) {
 
   return (
     <div className="min-h-screen bg-slate-50">
+      {loadError && (
+        <div className="bg-red-50 border-b border-red-200">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-red-800">
+                数据加载失败，以下内容未能读取（页面显示为空并不代表没有数据）
+              </p>
+              <p className="text-xs text-red-700 mt-0.5 break-all">{loadError}</p>
+            </div>
+            <button
+              onClick={() => loadData()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-700 bg-white border border-red-300 rounded-lg hover:bg-red-100 transition shrink-0"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              重新加载
+            </button>
+          </div>
+        </div>
+      )}
       <header className="sticky top-0 z-30 bg-white border-b border-slate-200 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -713,7 +781,7 @@ export default function TeacherDashboard({ onLogout }: Props) {
           </div>
         )}
 
-        {activeTab === 'market' && (
+        {activeTab === 'market' && settingsId && (
           <MarketEnvironmentTab
             settingsId={settingsId}
             benchmarkFiscalYear={benchmarkFiscalYear}
@@ -726,7 +794,7 @@ export default function TeacherDashboard({ onLogout }: Props) {
           />
         )}
 
-        {activeTab === 'deadline' && (
+        {activeTab === 'deadline' && settingsId && (
           <DeadlineTab
             settingsId={settingsId}
             submissionDeadline={submissionDeadline}
@@ -1583,11 +1651,19 @@ function DeadlineTab({
 
   async function handleClear() {
     setSaving(true);
-    setDeadlineInput('');
-    await supabase
+    const { error: err } = await supabase
       .from('app_settings')
       .update({ submission_deadline: null, updated_at: new Date().toISOString() })
       .eq('id', settingsId);
+    // Only reflect the change in the UI once the server confirmed it. Updating
+    // local state unconditionally made the panel claim "cleared" while the
+    // database still held the old deadline.
+    if (err) {
+      setError(err.message);
+      setSaving(false);
+      return;
+    }
+    setDeadlineInput('');
     onDeadlineChanged(null);
     setSaving(false);
   }
@@ -1607,11 +1683,16 @@ function DeadlineTab({
 
   async function handleClearLate() {
     setLateSaving(true);
-    setLateInput('');
-    await supabase
+    const { error: err } = await supabase
       .from('app_settings')
       .update({ late_submit_deadline: null, updated_at: new Date().toISOString() })
       .eq('id', settingsId);
+    if (err) {
+      setLateError(err.message);
+      setLateSaving(false);
+      return;
+    }
+    setLateInput('');
     onLateDeadlineChanged(null);
     setLateSaving(false);
   }

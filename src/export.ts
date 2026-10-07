@@ -3,9 +3,12 @@ import { WEEKS } from './domain';
 import { computeCycle } from './calc';
 
 export interface ExportRow {
-  rank: number;
+  rank: number | string;
   classLabel: string;
   groupName: string;
+  // false when the group has no decision row at all: its metrics are unknown,
+  // not zero, so it must not be ranked against groups that do have data.
+  hasData: boolean;
   occupancy: number;
   adr: number;
   revpar: number;
@@ -57,7 +60,7 @@ export function buildExportRows(
     const cycle = d ? computeCycle(d.payload, baseParams, simConfig, g.id) : null;
     const s = cycle
       ? cycleSummary(cycle)
-      : { occupancy: 0, adr: 0, revpar: 0, grossRevenue: 0, totalCommission: 0, contentCost: 0, netRevenue: -Infinity, netContribution: -Infinity, potentialLongTail: 0 };
+      : { occupancy: 0, adr: 0, revpar: 0, grossRevenue: 0, totalCommission: 0, contentCost: 0, netRevenue: 0, netContribution: 0, potentialLongTail: 0 };
     const groupSubs = subMap.get(g.id) ?? new Map();
     const weekStatuses: Record<string, string> = {};
     for (const w of WEEKS) {
@@ -70,6 +73,7 @@ export function buildExportRows(
     }
     return {
       rank: 0,
+      hasData: !!d,
       classLabel: g.class_label || '',
       groupName: g.name,
       occupancy: s.occupancy,
@@ -85,9 +89,15 @@ export function buildExportRows(
     };
   });
 
-  rows.sort((a, b) => b.netContribution - a.netContribution);
+  // Groups without any saved decision go last, and are not given a rank: their
+  // metrics are unknown, so ranking them (previously they carried -Infinity and
+  // still received a rank number) would misrepresent the class standings.
+  rows.sort((a, b) => {
+    if (a.hasData !== b.hasData) return a.hasData ? -1 : 1;
+    return b.netContribution - a.netContribution;
+  });
   rows.forEach((r, i) => {
-    r.rank = i + 1;
+    r.rank = r.hasData ? i + 1 : '';
   });
   return rows;
 }

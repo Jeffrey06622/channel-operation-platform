@@ -1,8 +1,9 @@
 import { useState } from 'react';
-import { Settings2, Save, RotateCcw, TrendingUp, Eye, DollarSign, Sparkles } from 'lucide-react';
+import { Settings2, Save, RotateCcw, TrendingUp, Eye, DollarSign, Sparkles, AlertCircle } from 'lucide-react';
 import type { ChannelSimConfig, ChannelSimParams } from '../types';
 import { DEFAULT_CHANNEL_SIM, resolveChannelSim } from '../domain';
 import { supabase } from '../supabaseClient';
+import { isNetworkError } from '../supabaseRequest';
 import { cn } from '../utils';
 
 interface Props {
@@ -39,6 +40,7 @@ export default function ChannelSimConfigPanel({ settingsId, initial, onSaved }: 
   const resolved = resolveChannelSim(initial);
   const [config, setConfig] = useState<ChannelSimConfig>(resolved);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
   const [expandedChannel, setExpandedChannel] = useState<string | null>('xhs');
 
   function updateParam(channelKey: string, field: keyof ChannelSimParams, value: number) {
@@ -60,6 +62,7 @@ export default function ChannelSimConfigPanel({ settingsId, initial, onSaved }: 
 
   async function handleSave() {
     setSaving(true);
+    setSaveError('');
     try {
       const { error } = await supabase
         .from('app_settings')
@@ -67,8 +70,16 @@ export default function ChannelSimConfigPanel({ settingsId, initial, onSaved }: 
         .eq('id', settingsId);
       if (error) throw error;
       onSaved(config);
-    } catch {
-      // ignore
+    } catch (err) {
+      // Previously this was `catch { // ignore }`, so a failed write looked
+      // exactly like a successful one: the button returned to normal and the
+      // teacher had no way to know the parameters were never stored.
+      const detail = err instanceof Error ? err.message : String(err);
+      setSaveError(
+        isNetworkError(err)
+          ? '网络不佳，参数未保存，请检查网络后重试'
+          : `参数未保存：${detail}`,
+      );
     }
     setSaving(false);
   }
@@ -169,6 +180,13 @@ export default function ChannelSimConfigPanel({ settingsId, initial, onSaved }: 
         <p className="text-xs text-slate-400">
           所有参数修改保存后立即生效，学生预览、教师面板、Excel导出均使用同一套计算逻辑。排名以净贡献（毛营收 - 佣金 - 内容投流成本）排序。
         </p>
+
+        {saveError && (
+          <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span className="break-all">{saveError}</span>
+          </div>
+        )}
       </div>
     </div>
   );

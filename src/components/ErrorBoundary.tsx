@@ -57,16 +57,21 @@ export default class ErrorBoundary extends Component<Props, State> {
     this.setState({ hasError: false, error: null, isNetworkError: false });
   };
 
-  // Safe reset: clears localStorage session for the current group and reloads,
-  // forcing a fresh data load from the server. This recovers from corrupted
-  // local state without losing server-side data.
+  // Safe reset: clears the cached session and reloads, forcing a fresh login
+  // and a fresh data load from the server. This recovers from corrupted local
+  // state without touching server-side data.
+  //
+  // IMPORTANT: the session key must match the one used by App.tsx. The key was
+  // previously written as 'hotel-sim-session', so this button silently did
+  // nothing — the stale session stayed in localStorage and the reload landed
+  // straight back on the broken screen.
   handleSafeReset = () => {
     try {
-      // Remove cached session to force fresh login + data load
-      localStorage.removeItem('hotel-sim-session');
+      // Remove the cached session to force a fresh login + data load
+      localStorage.removeItem('hotel-decision-session');
       // Remove any other app-specific caches
       for (const key of Object.keys(localStorage)) {
-        if (key.startsWith('hotel-sim-')) {
+        if (key.startsWith('hotel-decision-') || key.startsWith('hotel-sim-')) {
           localStorage.removeItem(key);
         }
       }
