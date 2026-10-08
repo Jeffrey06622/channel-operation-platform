@@ -392,7 +392,7 @@ ALTER TABLE public.groups DROP COLUMN IF EXISTS password_plain;
 
 -- groups: no hash read, no direct update; writes only via RPCs
 REVOKE SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
-  ON TABLE public.groups FROM anon, authenticated;
+  ON TABLE public.groups FROM anon, authenticated, PUBLIC;
 
 GRANT SELECT (id, name, hotel_name, class_label, created_at)
   ON public.groups TO anon, authenticated;
@@ -402,7 +402,7 @@ GRANT DELETE ON public.groups TO anon, authenticated;
 
 -- app_settings: secret column invisible to browsers, settings editable
 REVOKE SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
-  ON TABLE public.app_settings FROM anon, authenticated;
+  ON TABLE public.app_settings FROM anon, authenticated, PUBLIC;
 
 GRANT SELECT (id, current_week_key, updated_at, submission_deadline, late_submit_deadline,
               base_params, benchmark_fiscal_year, benchmark_hotel_class, channel_sim)
