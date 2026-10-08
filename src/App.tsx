@@ -3,6 +3,7 @@ import ErrorBoundary from './components/ErrorBoundary';
 import LoginScreen from './components/LoginScreen';
 import StudentDashboard from './components/StudentDashboard';
 import TeacherDashboard from './components/TeacherDashboard';
+import { clearTeacherSecret } from './auth';
 import type { GroupRow } from './types';
 
 const STORAGE_KEY = 'hotel-decision-session';
@@ -61,6 +62,10 @@ function App() {
   const [session, setSession] = useState<Session>(loadSession);
 
   function updateSession(s: Session) {
+    // Leaving the teacher session must also drop the in-memory teacher
+    // password, otherwise a later visitor on the same page could call the
+    // teacher-only RPCs without authenticating.
+    if (s.role !== 'teacher') clearTeacherSecret();
     saveSession(s);
     setSession(s);
   }

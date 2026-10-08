@@ -32,10 +32,12 @@ import {
   Flame,
   BarChart3,
   ShieldAlert,
+  Copy,
+  Check,
 } from 'lucide-react';
 import { supabase } from '../supabaseClient';
-import { supabaseFetch, isNetworkError, isRpcMissing } from '../supabaseRequest';
-import { hashPassword, verifyTeacherPassword } from '../auth';
+import { supabaseFetch, isNetworkError, isRpcMissing, isUnknownColumn } from '../supabaseRequest';
+import { hashPassword, verifyTeacherPassword, getTeacherSecret, setTeacherSecret, clearTeacherSecret } from '../auth';
 import type { AppSettingsRow, BaseParams, ChannelKey, ChannelSimConfig, DecisionPayload, DecisionRow, GroupRow, OpenWeekRow, RoomTypeKey, WeekSubmissionRow } from '../types';
 import { WEEKS, resolveRoomTypes } from '../domain';
 import { computeCycle } from '../calc';
@@ -47,6 +49,28 @@ import ChannelSimConfigPanel from './ChannelSimConfigPanel';
 import MarketEnvironmentTab from './MarketEnvironmentTab';
 
 const CLASS_OPTIONS = ['酒管25088', '酒管25089', '酒管25090', '酒管25091'];
+
+/**
+ * Insert groups, tolerating a database that does not have
+ * `groups.password_plain` yet (it is (re)introduced by the batch-3 migration).
+ * The plaintext only feeds the teacher's "小组密码" screen, so its absence must
+ * never block creating a group: on an unknown-column error the row is retried
+ * without it.
+ */
+async function insertGroups(rows: Array<Record<string, unknown>>) {
+  const { error } = await supabase.from('groups').insert(rows);
+  if (error && isUnknownColumn(error)) {
+    const stripped = rows.map((row) => {
+      const copy: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(row)) {
+        if (key !== 'password_plain') copy[key] = value;
+      }
+      return copy;
+    });
+    return await supabase.from('groups').insert(stripped);
+  }
+  return { error };
+}
 
 type Tab = 'groups' | 'params' | 'deadline' | 'market';
 
@@ -118,14 +142,38 @@ export default function TeacherDashboard({ onLogout }: Props) {
   }> | null>(null);
   const [healthChecking, setHealthChecking] = useState(false);
 
+  // Group-password lookup. The plaintext list is fetched on demand through a
+  // teacher-gated RPC and is only held in memory for the current page; it is
+  // deliberately not part of the regular `groups` read.
+  const [showPasswords, setShowPasswords] = useState(false);
+  const [passwordMap, setPasswordMap] = useState<Record<string, string | null> | null>(null);
+  const [passwordsLoading, setPasswordsLoading] = useState(false);
+  const [gateOpen, setGateOpen] = useState(false);
+  const [gatePassword, setGatePassword] = useState('');
+  const [gateError, setGateError] = useState('');
+  const [gateVerifying, setGateVerifying] = useState(false);
+
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
       const [gRes, dRes, subRes, settingsRes, openRes] = await Promise.all([
-        supabaseFetch(() => supabase.from('groups').select('*').order('name')),
+        // Explicit column lists for `groups` and `app_settings`: the hardening
+        // migration revokes table-wide SELECT on both (password columns and the
+        // teacher password hash must not be readable), so `select *` fails.
+        supabaseFetch(() =>
+          supabase
+            .from('groups')
+            .select('id, name, hotel_name, class_label, created_at')
+            .order('name'),
+        ),
         supabaseFetch(() => supabase.from('decisions').select('*').order('group_name')),
         supabaseFetch(() => supabase.from('week_submissions').select('*')),
-        supabaseFetch(() => supabase.from('app_settings').select('*').maybeSingle()),
+        supabaseFetch(() =>
+          supabase
+            .from('app_settings')
+            .select('id, current_week_key, updated_at, submission_deadline, late_submit_deadline, base_params, benchmark_fiscal_year, benchmark_hotel_class, channel_sim')
+            .maybeSingle(),
+        ),
         supabaseFetch(() => supabase.from('open_weeks').select('*').order('opened_at')),
       ]);
       // Supabase query builders resolve with { data: null, error } rather than
@@ -384,6 +432,16 @@ export default function TeacherDashboard({ onLogout }: Props) {
     setToast(`已退回 ${group.name} 的第${weekMeta?.index}周提交`);
   }
 
+  /** Keep an already-loaded password list consistent with a reset. */
+  function markPasswordsReset(ids: string[]) {
+    setPasswordMap((prev) => {
+      if (!prev) return prev;
+      const next = { ...prev };
+      for (const id of ids) if (id in next) next[id] = '000000';
+      return next;
+    });
+  }
+
   async function handleResetPassword(group: GroupRow) {
     if (!confirm(`确定将小组"${group.name}"的密码重置为 000000 吗？`)) return;
     try {
@@ -406,8 +464,98 @@ export default function TeacherDashboard({ onLogout }: Props) {
         return;
       }
       setToast(`已重置 ${group.name} 的密码为 000000`);
+      markPasswordsReset([group.id]);
     } catch (err) {
       setToast(isNetworkError(err) ? '网络不佳，请检查网络后重试' : '重置失败');
+    }
+  }
+
+  /**
+   * Read every group's password through the server-side gate. The RPC verifies
+   * the teacher password before returning anything, so a caller who only has
+   * the public anon key cannot harvest the list.
+   */
+  const fetchPasswords = useCallback(async (secret: string): Promise<boolean> => {
+    setPasswordsLoading(true);
+    try {
+      const { data, error } = await supabaseFetch(() =>
+        supabase.rpc('list_group_passwords', { p_teacher_password: secret }),
+      );
+      if (error && isRpcMissing(error)) {
+        // Legacy database (hardening migration not applied yet): the plaintext
+        // column is still directly readable and there is no gate to pass.
+        const { data: rows, error: legErr } = await supabaseFetch(() =>
+          supabase.from('groups').select('id, password_plain'),
+        );
+        if (legErr) throw legErr;
+        const map: Record<string, string | null> = {};
+        for (const r of (rows ?? []) as Array<{ id: string; password_plain: string | null }>) {
+          map[r.id] = r.password_plain ?? null;
+        }
+        setPasswordMap(map);
+        setPasswordsLoading(false);
+        return true;
+      }
+      if (error) throw error;
+      const res = data as
+        | { ok?: boolean; reason?: string; passwords?: Array<{ id: string; password: string | null }> }
+        | null;
+      if (!res || res.ok !== true) {
+        if (res?.reason === 'wrong_password') {
+          clearTeacherSecret();
+          setGateError('教师密码错误');
+          setGateOpen(true);
+        } else if (res?.reason === 'not_configured') {
+          setToast('教师密码尚未在服务器上配置');
+        } else {
+          setToast('读取小组密码失败，请重试');
+        }
+        setPasswordsLoading(false);
+        return false;
+      }
+      const map: Record<string, string | null> = {};
+      for (const item of res.passwords ?? []) map[item.id] = item.password ?? null;
+      setPasswordMap(map);
+      setPasswordsLoading(false);
+      return true;
+    } catch (err) {
+      setPasswordsLoading(false);
+      if (isUnknownColumn(err)) {
+        setToast('密码查看功能尚未启用：请先在数据库应用最新迁移');
+      } else if (isNetworkError(err)) {
+        setToast('网络不佳，请检查网络后重试');
+      } else {
+        setToast('读取小组密码失败：' + (err instanceof Error ? err.message : '未知错误'));
+      }
+      return false;
+    }
+  }, []);
+
+  async function handleShowPasswords() {
+    const secret = getTeacherSecret();
+    if (!secret) {
+      // Session restored from storage (page reload) — the password is no
+      // longer in memory, so ask for it once.
+      setGateError('');
+      setGatePassword('');
+      setGateOpen(true);
+      return;
+    }
+    if (await fetchPasswords(secret)) setShowPasswords(true);
+  }
+
+  async function handleGateSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!gatePassword) { setGateError('请输入教师密码'); return; }
+    setGateVerifying(true);
+    setGateError('');
+    const ok = await fetchPasswords(gatePassword);
+    setGateVerifying(false);
+    if (ok) {
+      setTeacherSecret(gatePassword);
+      setGateOpen(false);
+      setGatePassword('');
+      setShowPasswords(true);
     }
   }
 
@@ -454,27 +602,27 @@ export default function TeacherDashboard({ onLogout }: Props) {
 
   async function handleBatchResetPassword() {
     if (selectedGroupIds.size === 0) return;
+    // Snapshot the selection: the set is cleared on success and the loaded
+    // password list has to be refreshed for exactly the groups that were reset.
+    const targets = [...selectedGroupIds];
     const names = groups
       .filter((g) => selectedGroupIds.has(g.id))
       .map((g) => g.name)
       .join('、');
-    if (!confirm(`确定将以下 ${selectedGroupIds.size} 个小组的密码重置为 000000 吗？\n\n${names}`)) return;
+    if (!confirm(`确定将以下 ${targets.length} 个小组的密码重置为 000000 吗？\n\n${names}`)) return;
     // Preferred path: server-side reset RPC per group. Fall back to the legacy
     // direct bulk update until the batch-2 migration has been applied.
     try {
       const first = await supabaseFetch(() =>
-        supabase.rpc('reset_group_password', {
-          p_group_id: [...selectedGroupIds][0],
-        }),
+        supabase.rpc('reset_group_password', { p_group_id: targets[0] }),
       );
       if (!first.error || !isRpcMissing(first.error)) {
         if (first.error) {
           setToast(isNetworkError(first.error) ? '网络不佳，请检查网络后重试' : '重置失败：' + first.error.message);
           return;
         }
-        const rest = [...selectedGroupIds].slice(1);
         let failed = 0;
-        for (const gid of rest) {
+        for (const gid of targets.slice(1)) {
           const { error: oneErr } = await supabaseFetch(() =>
             supabase.rpc('reset_group_password', { p_group_id: gid }),
           );
@@ -482,10 +630,11 @@ export default function TeacherDashboard({ onLogout }: Props) {
         }
         setToast(
           failed === 0
-            ? `已重置 ${selectedGroupIds.size} 个小组的密码为 000000`
-            : `已重置 ${selectedGroupIds.size - failed} 个小组的密码，${failed} 个失败，请重试`,
+            ? `已重置 ${targets.length} 个小组的密码为 000000`
+            : `已重置 ${targets.length - failed} 个小组的密码，${failed} 个失败，请重试`,
         );
         setSelectedGroupIds(new Set());
+        markPasswordsReset(targets);
         return;
       }
       // Legacy fallback (migration not applied yet)
@@ -493,7 +642,7 @@ export default function TeacherDashboard({ onLogout }: Props) {
       const { data: updated, error } = await supabase
         .from('groups')
         .update({ password_hash: hash })
-        .in('id', [...selectedGroupIds])
+        .in('id', targets)
         .select('id');
       if (error) { setToast('重置失败：' + error.message); return; }
       if (!updated || updated.length === 0) {
@@ -502,6 +651,7 @@ export default function TeacherDashboard({ onLogout }: Props) {
       }
       setToast(`已重置 ${updated.length} 个小组的密码为 000000`);
       setSelectedGroupIds(new Set());
+      markPasswordsReset(targets);
     } catch (err) {
       setToast(isNetworkError(err) ? '网络不佳，请检查网络后重试' : '重置失败');
     }
@@ -782,6 +932,8 @@ export default function TeacherDashboard({ onLogout }: Props) {
             onViewGroup={setViewingGroup}
             onShowCreate={() => setShowCreate(true)}
             onShowBatchCreate={() => setShowBatchCreate(true)}
+            onShowPasswords={handleShowPasswords}
+            passwordsLoading={passwordsLoading}
           />
         )}
 
@@ -885,6 +1037,29 @@ export default function TeacherDashboard({ onLogout }: Props) {
         <ChangeTeacherPasswordModal onClose={() => setShowChangePassword(false)} />
       )}
 
+      {gateOpen && (
+        <TeacherGateModal
+          password={gatePassword}
+          error={gateError}
+          verifying={gateVerifying}
+          onChange={setGatePassword}
+          onSubmit={handleGateSubmit}
+          onClose={() => {
+            setGateOpen(false);
+            setGatePassword('');
+            setGateError('');
+          }}
+        />
+      )}
+
+      {showPasswords && passwordMap && (
+        <GroupPasswordModal
+          groups={groups}
+          passwordMap={passwordMap}
+          onClose={() => setShowPasswords(false)}
+        />
+      )}
+
       {toast && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-slate-800 text-white text-sm px-4 py-2.5 rounded-lg shadow-xl">
           {toast}
@@ -940,6 +1115,8 @@ interface GroupsTabProps {
   onViewGroup: (id: string) => void;
   onShowCreate: () => void;
   onShowBatchCreate: () => void;
+  onShowPasswords: () => void;
+  passwordsLoading: boolean;
 }
 
 function GroupsTab({
@@ -985,6 +1162,8 @@ function GroupsTab({
   onViewGroup,
   onShowCreate,
   onShowBatchCreate,
+  onShowPasswords,
+  passwordsLoading,
 }: GroupsTabProps) {
   const allSelected = filteredGroups.length > 0 && selectedGroupIds.size === filteredGroups.length;
   const someSelected = selectedGroupIds.size > 0;
@@ -1137,6 +1316,15 @@ function GroupsTab({
           >
             <ShieldAlert className={cn('w-4 h-4', healthChecking && 'animate-spin')} />
             {healthChecking ? '检查中...' : '数据健康检查'}
+          </button>
+          <button
+            onClick={onShowPasswords}
+            disabled={passwordsLoading}
+            className="inline-flex items-center gap-1.5 px-4 py-2 bg-white border border-slate-300 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-50 transition disabled:opacity-50"
+            title="查看各小组当前密码（通知学生用）"
+          >
+            <KeyRound className="w-4 h-4 text-slate-500" />
+            {passwordsLoading ? '读取中...' : '小组密码'}
           </button>
         </div>
       </div>
@@ -2186,12 +2374,13 @@ function CreateGroupModal({ existingGroups, onClose, onCreated }: { existingGrou
     try {
       const DEFAULT_PASSWORD = '000000';
       const hash = await hashPassword(DEFAULT_PASSWORD);
-      const { error: iErr } = await supabase.from('groups').insert({
+      const { error: iErr } = await insertGroups([{
         name: trimmedName,
         hotel_name: hotelName.trim(),
         class_label: trimmedClass,
         password_hash: hash,
-      });
+        password_plain: DEFAULT_PASSWORD,
+      }]);
       if (iErr) { setError(iErr.code === '23505' ? (trimmedClass ? `该班级内已存在同名小组「${trimmedName}」` : `已存在同名小组「${trimmedName}」`) : iErr.message); setLoading(false); return; }
       onCreated();
     } catch (err) {
@@ -2320,8 +2509,9 @@ function BatchCreateModal({
         hotel_name: hotelPrefix ? `${hotelPrefix}${startNum + i}号酒店` : '',
         class_label: trimmedClass,
         password_hash: hash,
+        password_plain: DEFAULT_PASSWORD,
       }));
-      const { error: iErr } = await supabase.from('groups').insert(rows);
+      const { error: iErr } = await insertGroups(rows);
       if (iErr) {
         setError(iErr.code === '23505' ? '该班级内部分小组名称已存在，请检查编号范围' : iErr.message);
         setLoading(false);
@@ -2431,6 +2621,219 @@ function BatchCreateModal({
             </button>
           </div>
         </form>
+      </div>
+    </div>
+  );
+}
+
+// ─── Group password lookup (teacher side) ───────────────────────────────────
+//
+// The group passwords are stored as plaintext so that the teacher can read
+// them back to a student who forgot theirs, but the column is not part of the
+// browser-readable surface of `groups`: it can only be fetched through the
+// `list_group_passwords` RPC, which verifies the teacher password first. On a
+// page reload the in-memory teacher password is gone, so the teacher is asked
+// for it once here.
+
+function TeacherGateModal({
+  password,
+  error,
+  verifying,
+  onChange,
+  onSubmit,
+  onClose,
+}: {
+  password: string;
+  error: string;
+  verifying: boolean;
+  onChange: (v: string) => void;
+  onSubmit: (e: React.FormEvent) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-10 h-10 rounded-xl bg-amber-50 flex items-center justify-center">
+            <Lock className="w-5 h-5 text-amber-600" />
+          </div>
+          <div>
+            <h3 className="text-base font-semibold text-slate-800">查看小组密码</h3>
+            <p className="text-xs text-slate-500">请再次输入教师密码以确认身份</p>
+          </div>
+        </div>
+        <form onSubmit={onSubmit} className="space-y-3">
+          <input
+            type="password"
+            value={password}
+            autoFocus
+            onChange={(e) => onChange(e.target.value)}
+            placeholder="教师密码"
+            className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/40 focus:border-transparent transition"
+          />
+          {error && (
+            <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</div>
+          )}
+          <div className="flex gap-2 pt-1">
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex-1 py-2 border border-slate-200 text-slate-600 text-sm font-medium rounded-lg hover:bg-slate-50 transition"
+            >
+              取消
+            </button>
+            <button
+              type="submit"
+              disabled={verifying}
+              className="flex-1 py-2 bg-gradient-to-r from-amber-500 to-amber-600 text-white text-sm font-medium rounded-lg hover:from-amber-400 hover:to-amber-500 transition disabled:opacity-50"
+            >
+              {verifying ? '验证中...' : '确认'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function GroupPasswordModal({
+  groups,
+  passwordMap,
+  onClose,
+}: {
+  groups: GroupRow[];
+  passwordMap: Record<string, string | null>;
+  onClose: () => void;
+}) {
+  // Masked by default: the teacher may have this open on a projector.
+  const [revealed, setRevealed] = useState(false);
+  const [copied, setCopied] = useState('');
+
+  const ordered = [...groups].sort((a, b) =>
+    `${a.class_label}${a.name}`.localeCompare(`${b.class_label}${b.name}`),
+  );
+
+  function passwordOf(id: string): string | null | undefined {
+    return passwordMap[id];
+  }
+
+  async function copy(text: string, key: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(key);
+      setTimeout(() => setCopied(''), 1500);
+    } catch {
+      setCopied('');
+    }
+  }
+
+  const lines = ordered
+    .map((g) => `${g.class_label || '未分班'}\t${g.name}\t${passwordOf(g.id) ?? '未记录'}`)
+    .join('\n');
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col">
+        <div className="flex items-start justify-between gap-3 p-5 border-b border-slate-100">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-50 flex items-center justify-center">
+              <KeyRound className="w-5 h-5 text-amber-600" />
+            </div>
+            <div>
+              <h3 className="text-base font-semibold text-slate-800">小组密码一览</h3>
+              <p className="text-xs text-slate-500">
+                共 {ordered.length} 个小组 · 仅用于告知学生本人，请勿在课堂投屏时展示
+              </p>
+            </div>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition">
+            <XIcon className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="px-5 py-3 border-b border-slate-100 flex items-center gap-2">
+          <button
+            onClick={() => setRevealed((v) => !v)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition"
+          >
+            {revealed ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+            {revealed ? '隐藏密码' : '显示密码'}
+          </button>
+          <button
+            onClick={() => copy(lines, '__all__')}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition"
+          >
+            <Copy className="w-3.5 h-3.5" />
+            复制全部
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto">
+          {ordered.length === 0 ? (
+            <div className="p-10 text-center text-sm text-slate-400">还没有小组</div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-slate-50 border-b border-slate-200">
+                <tr>
+                  <th className="text-left px-4 py-2.5 font-medium text-slate-600">班级</th>
+                  <th className="text-left px-4 py-2.5 font-medium text-slate-600">小组名称</th>
+                  <th className="text-left px-4 py-2.5 font-medium text-slate-600">密码</th>
+                  <th className="px-4 py-2.5 w-20"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {ordered.map((g) => {
+                  const pwd = passwordOf(g.id);
+                  return (
+                    <tr key={g.id} className="hover:bg-slate-50/70">
+                      <td className="px-4 py-2.5 text-slate-500 whitespace-nowrap">{g.class_label}</td>
+                      <td className="px-4 py-2.5 text-slate-700">{g.name}</td>
+                      <td className="px-4 py-2.5">
+                        {pwd === undefined ? (
+                          <span className="text-xs text-slate-400">—</span>
+                        ) : pwd === null ? (
+                          <span className="text-xs text-slate-400" title="该组密码在学生修改前未能记录，请重置为统一密码">
+                            未记录（可重置）
+                          </span>
+                        ) : (
+                          <span className="font-mono tracking-wider text-slate-800">
+                            {revealed ? pwd : '••••••'}
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5 text-right">
+                        {typeof pwd === 'string' && (
+                          <button
+                            onClick={() => copy(pwd, g.id)}
+                            className="inline-flex items-center gap-1 px-2 py-1 text-xs text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition"
+                          >
+                            {copied === g.id ? (
+                              <>
+                                <Check className="w-3.5 h-3.5" />
+                                已复制
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="w-3.5 h-3.5" />
+                                复制
+                              </>
+                            )}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {copied === '__all__' && (
+          <div className="px-5 py-2 text-xs text-emerald-600 bg-emerald-50 border-t border-emerald-100">
+            已复制全部小组密码（制表符分隔，可直接粘贴到 Excel）
+          </div>
+        )}
       </div>
     </div>
   );

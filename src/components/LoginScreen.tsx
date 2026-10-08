@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { Hotel, KeyRound, GraduationCap, Users, Lock, BookOpen, Eye, EyeOff, Loader2 } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import { supabaseFetch, isNetworkError, isRpcMissing } from '../supabaseRequest';
-import { verifyPassword, verifyTeacherPassword } from '../auth';
+import { verifyPassword, verifyTeacherPassword, setTeacherSecret } from '../auth';
 import type { GroupRow } from '../types';
 import { cn } from '../utils';
 
@@ -34,7 +34,10 @@ export default function LoginScreen({ onGroupLogin, onTeacherLogin }: Props) {
       const { data, error: qErr } = await supabaseFetch(() =>
         supabase
           .from('groups')
-          .select('*')
+          // Explicit column list: after the hardening migration the browser
+          // holds no privilege on the password columns, so `select *` is
+          // rejected outright.
+          .select('id, name, hotel_name, class_label, created_at')
           .eq('class_label', cls)
           .order('name'),
       );
@@ -175,6 +178,9 @@ export default function LoginScreen({ onGroupLogin, onTeacherLogin }: Props) {
           setLoading(false);
           return;
         }
+        // Keep the password in memory for the session: the teacher-only RPCs
+        // (e.g. listing group passwords) ask for it as proof of identity.
+        setTeacherSecret(teacherPassword);
         onTeacherLogin();
       } else if (isRpcMissing(verifyErr)) {
         // Legacy path (migration not applied yet)
@@ -199,6 +205,7 @@ export default function LoginScreen({ onGroupLogin, onTeacherLogin }: Props) {
         }
         const ok = await verifyTeacherPassword(teacherPassword, storedHash);
         if (ok) {
+          setTeacherSecret(teacherPassword);
           onTeacherLogin();
         } else {
           setError('教师密码错误');

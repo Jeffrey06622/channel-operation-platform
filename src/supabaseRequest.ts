@@ -97,4 +97,23 @@ export function isRpcMissing(err: unknown): boolean {
   return false;
 }
 
+/**
+ * True when the error means "this column does not exist on the server".
+ * Used while rolling out the batch-3 migration (groups.password_plain):
+ * an insert that carries the column is retried without it on a database where
+ * the migration has not been applied yet, so group creation never breaks in
+ * the window between publishing the frontend and applying the SQL.
+ */
+export function isUnknownColumn(err: unknown): boolean {
+  if (!err) return false;
+  const code = (err as { code?: string }).code;
+  if (code === 'PGRST204' || code === '42703') return true;
+  const message =
+    err instanceof Error ? err.message : (err as { message?: string }).message;
+  if (typeof message === 'string') {
+    return /column .* does not exist|could not find the '.*' column/i.test(message);
+  }
+  return false;
+}
+
 export { supabase };

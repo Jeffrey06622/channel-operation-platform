@@ -19,6 +19,27 @@ export async function verifyPassword(
 export const TEACHER_DEFAULT_PASSWORD = 'teacher2024';
 
 /**
+ * The teacher password typed at login, held **in memory only** for the
+ * lifetime of the page. It is the credential the teacher-facing RPCs ask for
+ * (currently `list_group_passwords`) and it is deliberately never written to
+ * localStorage/sessionStorage: after a reload the teacher is asked for it
+ * again instead of leaving a usable credential lying on the device.
+ */
+let teacherSecret = '';
+
+export function setTeacherSecret(password: string): void {
+  teacherSecret = password;
+}
+
+export function getTeacherSecret(): string {
+  return teacherSecret;
+}
+
+export function clearTeacherSecret(): void {
+  teacherSecret = '';
+}
+
+/**
  * Verify a teacher login attempt.
  * If storedHash is empty, compare against the default plaintext password.
  * Otherwise verify against the stored hash.
