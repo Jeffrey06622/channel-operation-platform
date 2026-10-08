@@ -41,7 +41,7 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { supabase } from '../supabaseClient';
-import { supabaseFetch, isNetworkError } from '../supabaseRequest';
+import { supabaseFetch, isNetworkError, isRpcMissing } from '../supabaseRequest';
 import { hashPassword } from '../auth';
 import {
   WEEKS,
@@ -812,30 +812,67 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
       setPwdError('两次输入的新密码不一致');
       return;
     }
-    const oldHash = await hashPassword(oldPwd);
-    if (oldHash !== group.password_hash) {
-      setPwdError('原密码不正确');
-      return;
-    }
-    const newHash = await hashPassword(newPwd);
     setPwdSaving(true);
-    const { error: dbErr } = await supabaseFetch(() =>
-      supabase
-        .from('groups')
-        .update({ password_hash: newHash, password_plain: newPwd })
-        .eq('id', group.id),
-    );
-    setPwdSaving(false);
-    if (dbErr) {
-      setPwdError(isNetworkError(dbErr) ? '网络不佳，请检查网络后重试' : '保存失败：' + dbErr.message);
-      return;
+    try {
+      // Preferred path: server-side verification + rotation via
+      // change_group_password, so the browser never needs to read the stored
+      // hash. The legacy direct-update path is kept as a fallback until the
+      // database migration introducing the RPC has been applied.
+      const { data: rpcData, error: rpcErr } = await supabaseFetch(() =>
+        supabase.rpc('change_group_password', {
+          p_group_id: group.id,
+          p_old_password: oldPwd,
+          p_new_password: newPwd,
+        }),
+      );
+      if (rpcErr && isRpcMissing(rpcErr)) {
+        // Legacy path (migration not applied yet)
+        const oldHash = await hashPassword(oldPwd);
+        if (oldHash !== group.password_hash) {
+          setPwdError('原密码不正确');
+          setPwdSaving(false);
+          return;
+        }
+        const newHash = await hashPassword(newPwd);
+        const { error: dbErr } = await supabaseFetch(() =>
+          supabase
+            .from('groups')
+            .update({ password_hash: newHash })
+            .eq('id', group.id),
+        );
+        if (dbErr) {
+          setPwdError(isNetworkError(dbErr) ? '网络不佳，请检查网络后重试' : '保存失败：' + dbErr.message);
+          setPwdSaving(false);
+          return;
+        }
+      } else if (rpcErr) {
+        setPwdError(isNetworkError(rpcErr) ? '网络不佳，请检查网络后重试' : '保存失败：' + rpcErr.message);
+        setPwdSaving(false);
+        return;
+      } else {
+        const result = rpcData as { ok?: boolean; reason?: string } | null;
+        if (!result || result.ok !== true) {
+          if (result?.reason === 'wrong_old_password') {
+            setPwdError('原密码不正确');
+          } else if (result?.reason === 'password_too_short') {
+            setPwdError('新密码至少6位');
+          } else if (result?.reason === 'group_not_found') {
+            setPwdError('未找到该小组，请重新登录');
+          } else {
+            setPwdError('密码修改失败，请稍后重试');
+          }
+          setPwdSaving(false);
+          return;
+        }
+      }
+      onGroupUpdate(group);
+      setShowPwdModal(false);
+      setToast('密码修改成功');
+      setTimeout(() => setToast(''), 3000);
+    } catch (err) {
+      setPwdError(isNetworkError(err) ? '网络不佳，请检查网络后重试' : '密码修改失败，请稍后重试');
     }
-    group.password_hash = newHash;
-    group.password_plain = newPwd;
-    onGroupUpdate(group);
-    setShowPwdModal(false);
-    setToast('密码修改成功');
-    setTimeout(() => setToast(''), 3000);
+    setPwdSaving(false);
   }
 
   if (viewMode === 'market') {

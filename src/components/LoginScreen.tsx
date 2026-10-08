@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Hotel, KeyRound, GraduationCap, Users, Lock, BookOpen, Eye, EyeOff, Loader2 } from 'lucide-react';
 import { supabase } from '../supabaseClient';
-import { supabaseFetch, isNetworkError } from '../supabaseRequest';
+import { supabaseFetch, isNetworkError, isRpcMissing } from '../supabaseRequest';
 import { verifyPassword, verifyTeacherPassword } from '../auth';
 import type { GroupRow } from '../types';
 import { cn } from '../utils';
@@ -83,26 +83,62 @@ export default function LoginScreen({ onGroupLogin, onTeacherLogin }: Props) {
         setLoading(false);
         return;
       }
-      const { data, error: qErr } = await supabaseFetch(() =>
-        supabase
-          .from('groups')
-          .select('*')
-          .eq('id', selected.id)
-          .maybeSingle(),
+      // Preferred path: server-side verification via verify_group_login, so
+      // the password hash never needs to be readable by the browser. The
+      // legacy client-side path stays as a fallback until the database
+      // migration introducing the RPC has been applied.
+      const { data: verifyData, error: verifyErr } = await supabaseFetch(() =>
+        supabase.rpc('verify_group_login', {
+          p_group_id: selected.id,
+          p_password: groupPassword,
+        }),
       );
-      if (qErr) throw qErr;
-      if (!data) {
-        setError('未找到此小组，请联系老师');
-        setLoading(false);
-        return;
+      if (!verifyErr) {
+        if (!verifyData || (verifyData as { ok?: boolean }).ok !== true) {
+          setError('密码错误');
+          setLoading(false);
+          return;
+        }
+        const { data: rowData, error: rowErr } = await supabaseFetch(() =>
+          supabase
+            .from('groups')
+            .select('id, name, hotel_name, class_label, created_at')
+            .eq('id', selected.id)
+            .maybeSingle(),
+        );
+        if (rowErr) throw rowErr;
+        if (!rowData) {
+          setError('未找到此小组，请联系老师');
+          setLoading(false);
+          return;
+        }
+        onGroupLogin(rowData as GroupRow);
+      } else if (isRpcMissing(verifyErr)) {
+        // Legacy path (migration not applied yet): read the hash and verify
+        // in the browser, as the original code did.
+        const { data, error: qErr } = await supabaseFetch(() =>
+          supabase
+            .from('groups')
+            .select('*')
+            .eq('id', selected.id)
+            .maybeSingle(),
+        );
+        if (qErr) throw qErr;
+        if (!data) {
+          setError('未找到此小组，请联系老师');
+          setLoading(false);
+          return;
+        }
+        const ok = await verifyPassword(groupPassword, data.password_hash);
+        if (!ok) {
+          setError('密码错误');
+          setLoading(false);
+          return;
+        }
+        onGroupLogin(data as GroupRow);
+      } else {
+        throw verifyErr;
       }
-      const ok = await verifyPassword(groupPassword, data.password_hash);
-      if (!ok) {
-        setError('密码错误');
-        setLoading(false);
-        return;
-      }
-      onGroupLogin(data as GroupRow);
     } catch (err) {
       if (isNetworkError(err)) {
         setError('网络不佳，请检查网络后重试');
@@ -122,30 +158,53 @@ export default function LoginScreen({ onGroupLogin, onTeacherLogin }: Props) {
     }
     setLoading(true);
     try {
-      const { data, error: qErr } = await supabaseFetch(() =>
-        supabase
-          .from('app_settings')
-          .select('teacher_password_hash')
-          .limit(1)
-          .maybeSingle(),
+      // Preferred path: server-side verification via verify_teacher_login.
+      // The legacy path stays as a fallback until the database migration
+      // introducing the RPC has been applied.
+      const { data: verifyData, error: verifyErr } = await supabaseFetch(() =>
+        supabase.rpc('verify_teacher_login', { p_password: teacherPassword }),
       );
-      if (qErr) throw qErr;
-      const storedHash = data?.teacher_password_hash ?? '';
-      // Refuse outright when no hash is configured on the server. Passing an
-      // empty string to the verifier previously fell through to a default
-      // credential that is compiled into the public JS bundle — anyone can read
-      // it from the site's asset file. With no hash there is nothing legitimate
-      // to compare against, so the correct answer is "not configured".
-      if (!storedHash) {
-        setError('教师密码尚未在服务器上配置，请联系平台维护人设置');
-        setLoading(false);
-        return;
-      }
-      const ok = await verifyTeacherPassword(teacherPassword, storedHash);
-      if (ok) {
+      if (!verifyErr) {
+        const reason = (verifyData as { ok?: boolean; reason?: string } | null);
+        if (!reason || reason.ok !== true) {
+          if (reason?.reason === 'not_configured') {
+            setError('教师密码尚未在服务器上配置，请联系平台维护人设置');
+          } else {
+            setError('教师密码错误');
+          }
+          setLoading(false);
+          return;
+        }
         onTeacherLogin();
+      } else if (isRpcMissing(verifyErr)) {
+        // Legacy path (migration not applied yet)
+        const { data, error: qErr } = await supabaseFetch(() =>
+          supabase
+            .from('app_settings')
+            .select('teacher_password_hash')
+            .limit(1)
+            .maybeSingle(),
+        );
+        if (qErr) throw qErr;
+        const storedHash = data?.teacher_password_hash ?? '';
+        // Refuse outright when no hash is configured on the server. Passing an
+        // empty string to the verifier previously fell through to a default
+        // credential that is compiled into the public JS bundle — anyone can read
+        // it from the site's asset file. With no hash there is nothing legitimate
+        // to compare against, so the correct answer is "not configured".
+        if (!storedHash) {
+          setError('教师密码尚未在服务器上配置，请联系平台维护人设置');
+          setLoading(false);
+          return;
+        }
+        const ok = await verifyTeacherPassword(teacherPassword, storedHash);
+        if (ok) {
+          onTeacherLogin();
+        } else {
+          setError('教师密码错误');
+        }
       } else {
-        setError('教师密码错误');
+        throw verifyErr;
       }
     } catch (err) {
       if (isNetworkError(err)) {
@@ -345,7 +404,7 @@ export default function LoginScreen({ onGroupLogin, onTeacherLogin }: Props) {
                   </button>
                 </div>
                 <p className="text-xs text-slate-500 mt-1.5">
-                  默认密码：teacher2024，登录后可自行修改
+                  教师密码由授课教师自行保管，如遗忘请联系平台维护人重置
                 </p>
               </div>
               {error && (

@@ -34,7 +34,7 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 import { supabase } from '../supabaseClient';
-import { supabaseFetch, isNetworkError } from '../supabaseRequest';
+import { supabaseFetch, isNetworkError, isRpcMissing } from '../supabaseRequest';
 import { hashPassword, verifyTeacherPassword } from '../auth';
 import type { AppSettingsRow, BaseParams, ChannelKey, ChannelSimConfig, DecisionPayload, DecisionRow, GroupRow, OpenWeekRow, RoomTypeKey, WeekSubmissionRow } from '../types';
 import { WEEKS, resolveRoomTypes } from '../domain';
@@ -387,15 +387,24 @@ export default function TeacherDashboard({ onLogout }: Props) {
   async function handleResetPassword(group: GroupRow) {
     if (!confirm(`确定将小组"${group.name}"的密码重置为 000000 吗？`)) return;
     try {
-      const hash = await hashPassword('000000');
-      const result = await supabaseFetch(() =>
-        supabase
-          .from('groups')
-          .update({ password_hash: hash, password_plain: '000000' })
-          .eq('id', group.id),
+      // Preferred path: server-side reset RPC. The legacy direct update stays
+      // as a fallback until the batch-2 migration has been applied.
+      const { error: rpcErr } = await supabaseFetch(() =>
+        supabase.rpc('reset_group_password', { p_group_id: group.id }),
       );
-      if (result.error) { setToast('重置失败：' + result.error.message); return; }
-      await loadData();
+      if (rpcErr && isRpcMissing(rpcErr)) {
+        const hash = await hashPassword('000000');
+        const result = await supabaseFetch(() =>
+          supabase
+            .from('groups')
+            .update({ password_hash: hash })
+            .eq('id', group.id),
+        );
+        if (result.error) { setToast('重置失败：' + result.error.message); return; }
+      } else if (rpcErr) {
+        setToast(isNetworkError(rpcErr) ? '网络不佳，请检查网络后重试' : '重置失败：' + rpcErr.message);
+        return;
+      }
       setToast(`已重置 ${group.name} 的密码为 000000`);
     } catch (err) {
       setToast(isNetworkError(err) ? '网络不佳，请检查网络后重试' : '重置失败');
@@ -450,19 +459,52 @@ export default function TeacherDashboard({ onLogout }: Props) {
       .map((g) => g.name)
       .join('、');
     if (!confirm(`确定将以下 ${selectedGroupIds.size} 个小组的密码重置为 000000 吗？\n\n${names}`)) return;
-    const hash = await hashPassword('000000');
-    const { data: updated, error } = await supabase
-      .from('groups')
-      .update({ password_hash: hash, password_plain: '000000' })
-      .in('id', [...selectedGroupIds])
-      .select('id');
-    if (error) { setToast('重置失败：' + error.message); return; }
-    if (!updated || updated.length === 0) {
-      setToast('重置失败：服务器未更新任何记录，请刷新后重试');
-      return;
+    // Preferred path: server-side reset RPC per group. Fall back to the legacy
+    // direct bulk update until the batch-2 migration has been applied.
+    try {
+      const first = await supabaseFetch(() =>
+        supabase.rpc('reset_group_password', {
+          p_group_id: [...selectedGroupIds][0],
+        }),
+      );
+      if (!first.error || !isRpcMissing(first.error)) {
+        if (first.error) {
+          setToast(isNetworkError(first.error) ? '网络不佳，请检查网络后重试' : '重置失败：' + first.error.message);
+          return;
+        }
+        const rest = [...selectedGroupIds].slice(1);
+        let failed = 0;
+        for (const gid of rest) {
+          const { error: oneErr } = await supabaseFetch(() =>
+            supabase.rpc('reset_group_password', { p_group_id: gid }),
+          );
+          if (oneErr) failed++;
+        }
+        setToast(
+          failed === 0
+            ? `已重置 ${selectedGroupIds.size} 个小组的密码为 000000`
+            : `已重置 ${selectedGroupIds.size - failed} 个小组的密码，${failed} 个失败，请重试`,
+        );
+        setSelectedGroupIds(new Set());
+        return;
+      }
+      // Legacy fallback (migration not applied yet)
+      const hash = await hashPassword('000000');
+      const { data: updated, error } = await supabase
+        .from('groups')
+        .update({ password_hash: hash })
+        .in('id', [...selectedGroupIds])
+        .select('id');
+      if (error) { setToast('重置失败：' + error.message); return; }
+      if (!updated || updated.length === 0) {
+        setToast('重置失败：服务器未更新任何记录，请刷新后重试');
+        return;
+      }
+      setToast(`已重置 ${updated.length} 个小组的密码为 000000`);
+      setSelectedGroupIds(new Set());
+    } catch (err) {
+      setToast(isNetworkError(err) ? '网络不佳，请检查网络后重试' : '重置失败');
     }
-    await loadData();
-    setToast(`已重置 ${updated.length} 个小组的密码`);
   }
 
   function toggleSelectGroup(id: string) {
@@ -1314,7 +1356,6 @@ function GroupsTab({
                               <RotateCcw className="w-4 h-4" />
                             </button>
                           )}
-                          <PasswordPeek password={g.password_plain} />
                           <button
                             onClick={() => onResetPassword(g)}
                             className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition"
@@ -1987,21 +2028,53 @@ function ChangeTeacherPasswordModal({ onClose }: { onClose: () => void }) {
     if (next !== confirm) { setError('两次输入不一致'); return; }
     setLoading(true);
     try {
-      const { data, error: qErr } = await supabase
-        .from('app_settings')
-        .select('id, teacher_password_hash')
-        .limit(1)
-        .maybeSingle();
-      if (qErr) throw qErr;
-      const storedHash = data?.teacher_password_hash ?? '';
-      const ok = await verifyTeacherPassword(current, storedHash);
-      if (!ok) { setError('当前密码错误'); setLoading(false); return; }
-      const newHash = await hashPassword(next);
-      const { error: uErr } = await supabase
-        .from('app_settings')
-        .update({ teacher_password_hash: newHash })
-        .eq('id', data!.id);
-      if (uErr) throw uErr;
+      // Preferred path: server-side verify + rotate via change_teacher_password.
+      // Falls back to the legacy direct path until the batch-2 migration has
+      // been applied.
+      const { data: rpcData, error: rpcErr } = await supabaseFetch(() =>
+        supabase.rpc('change_teacher_password', {
+          p_old_password: current,
+          p_new_password: next,
+        }),
+      );
+      if (rpcErr && isRpcMissing(rpcErr)) {
+        // Legacy path (migration not applied yet)
+        const { data, error: qErr } = await supabase
+          .from('app_settings')
+          .select('id, teacher_password_hash')
+          .limit(1)
+          .maybeSingle();
+        if (qErr) throw qErr;
+        const storedHash = data?.teacher_password_hash ?? '';
+        // No configured hash means there is nothing legitimate to verify
+        // against — refuse instead of falling back to a bundled default.
+        if (!storedHash) { setError('教师密码尚未在服务器上配置'); setLoading(false); return; }
+        const ok = await verifyTeacherPassword(current, storedHash);
+        if (!ok) { setError('当前密码错误'); setLoading(false); return; }
+        const newHash = await hashPassword(next);
+        const { error: uErr } = await supabase
+          .from('app_settings')
+          .update({ teacher_password_hash: newHash })
+          .eq('id', data!.id);
+        if (uErr) throw uErr;
+      } else if (rpcErr) {
+        setError(isNetworkError(rpcErr) ? '网络不佳，请检查网络后重试' : rpcErr.message);
+        setLoading(false);
+        return;
+      } else {
+        const result = rpcData as { ok?: boolean; reason?: string } | null;
+        if (!result || result.ok !== true) {
+          if (result?.reason === 'wrong_old_password') {
+            setError('当前密码错误');
+          } else if (result?.reason === 'not_configured') {
+            setError('教师密码尚未在服务器上配置');
+          } else {
+            setError('密码修改失败，请稍后重试');
+          }
+          setLoading(false);
+          return;
+        }
+      }
       setSuccess(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : '修改失败');
@@ -2038,7 +2111,7 @@ function ChangeTeacherPasswordModal({ onClose }: { onClose: () => void }) {
           </div>
           <div>
             <h3 className="text-base font-semibold text-slate-800">修改教师密码</h3>
-            <p className="text-xs text-slate-400">默认密码 teacher2024</p>
+            <p className="text-xs text-slate-400">新密码至少 6 位，修改后请妥善保管</p>
           </div>
         </div>
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -2088,25 +2161,6 @@ function ChangeTeacherPasswordModal({ onClose }: { onClose: () => void }) {
   );
 }
 
-function PasswordPeek({ password }: { password: string }) {
-  const [visible, setVisible] = useState(false);
-  return (
-    <div className="relative inline-flex items-center">
-      <button
-        onClick={() => setVisible((v) => !v)}
-        className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition"
-        title={visible ? '隐藏密码' : '查看密码'}
-      >
-        {visible ? <EyeOff className="w-4 h-4" /> : <KeyRound className="w-4 h-4" />}
-      </button>
-      {visible && (
-        <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 px-2 py-1 bg-slate-800 text-white text-xs rounded-lg whitespace-nowrap shadow-lg z-20 font-mono">
-          {password}
-        </span>
-      )}
-    </div>
-  );
-}
 
 function CreateGroupModal({ existingGroups, onClose, onCreated }: { existingGroups: GroupRow[]; onClose: () => void; onCreated: () => void }) {
   const [classLabel, setClassLabel] = useState('');
@@ -2137,7 +2191,6 @@ function CreateGroupModal({ existingGroups, onClose, onCreated }: { existingGrou
         hotel_name: hotelName.trim(),
         class_label: trimmedClass,
         password_hash: hash,
-        password_plain: DEFAULT_PASSWORD,
       });
       if (iErr) { setError(iErr.code === '23505' ? (trimmedClass ? `该班级内已存在同名小组「${trimmedName}」` : `已存在同名小组「${trimmedName}」`) : iErr.message); setLoading(false); return; }
       onCreated();
@@ -2267,7 +2320,6 @@ function BatchCreateModal({
         hotel_name: hotelPrefix ? `${hotelPrefix}${startNum + i}号酒店` : '',
         class_label: trimmedClass,
         password_hash: hash,
-        password_plain: DEFAULT_PASSWORD,
       }));
       const { error: iErr } = await supabase.from('groups').insert(rows);
       if (iErr) {

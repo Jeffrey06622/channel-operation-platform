@@ -75,4 +75,26 @@ export function isNetworkError(err: unknown): boolean {
   return err instanceof NetworkError;
 }
 
+/**
+ * True when the error means "this RPC does not exist on the server yet".
+ * The batch-2 database migration introduces verify_group_login /
+ * change_group_password / change_teacher_password / reset_group_password.
+ * Until that migration is applied, callers fall back to the legacy code
+ * path; once it is applied the legacy path loses its column privileges.
+ * This check is what makes the frontend work in BOTH states.
+ */
+export function isRpcMissing(err: unknown): boolean {
+  if (!err) return false;
+  const code = (err as { code?: string }).code;
+  if (code === 'PGRST202') return true;
+  const message =
+    err instanceof Error ? err.message : (err as { message?: string }).message;
+  if (typeof message === 'string') {
+    return /could not find the function|function .* does not exist|schema cache empty/i.test(
+      message,
+    );
+  }
+  return false;
+}
+
 export { supabase };

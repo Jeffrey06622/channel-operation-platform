@@ -152,8 +152,14 @@ export interface CycleResult {
 export interface GroupRow {
   id: string;
   name: string;
-  password_hash: string;
-  password_plain: string;
+  /**
+   * Password columns are optional: after the batch-2 database hardening the
+   * browser can no longer read them, and password operations go through
+   * server-side RPCs (verify_group_login / change_group_password /
+   * reset_group_password) instead of direct column access.
+   */
+  password_hash?: string;
+  password_plain?: string;
   hotel_name: string;
   class_label: string;
   created_at: string;
