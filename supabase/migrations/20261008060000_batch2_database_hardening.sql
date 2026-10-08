@@ -32,10 +32,12 @@ no-auth classroom design. No existing decision data is deleted or rewritten.
    Re-declaring here guarantees the live database runs the newest body even
    if an earlier migration was skipped.
 
-4. `groups.password_plain` dropped
-   - The plaintext password column is removed. The teacher-side "view
-     password" feature is replaced by reset-to-default; students change
-     their own passwords via `change_group_password`.
+4. `groups.password_plain` kept but made unreadable
+   - The plaintext password column is no longer part of the browser-readable
+     surface (dropped from the SELECT grant). Password rotation goes through
+     the RPCs; students change their own passwords via
+     `change_group_password`. The column itself is intentionally preserved —
+     see section 4 for why it is not dropped.
 
 5. Least-privilege column grants
    - `groups`: browsers can read only (id, name, hotel_name, class_label,
@@ -385,8 +387,16 @@ $$;
 
 GRANT EXECUTE ON FUNCTION public.save_week(uuid, text, jsonb, text, text, timestamptz) TO anon, authenticated;
 
--- ─── 4. Drop the plaintext password column ─────────────────────────────────
-ALTER TABLE public.groups DROP COLUMN IF EXISTS password_plain;
+-- ─── 4. Plaintext password column ─────────────────────────────────────────
+-- Kept, but NOT readable by browsers (see section 5). The original batch-2
+-- plan dropped this column; the follow-up migration
+-- (20261008090000_restore_group_password_view.sql) restores the teacher-side
+-- "view password" feature, and dropping it here would permanently destroy the
+-- plaintext of every password a student had already customised before that
+-- migration runs. Keeping the column under a column-level grant is equally
+-- safe: `anon` / `authenticated` get INSERT but no SELECT on it, so the value
+-- is reachable only through the teacher-gated list_group_passwords() RPC.
+-- (No statement here: the column is left untouched on purpose.)
 
 -- ─── 5. Least-privilege column grants ──────────────────────────────────────
 
@@ -396,7 +406,7 @@ REVOKE SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
 
 GRANT SELECT (id, name, hotel_name, class_label, created_at)
   ON public.groups TO anon, authenticated;
-GRANT INSERT (name, hotel_name, class_label, password_hash)
+GRANT INSERT (name, hotel_name, class_label, password_hash, password_plain)
   ON public.groups TO anon, authenticated;
 GRANT DELETE ON public.groups TO anon, authenticated;
 

@@ -36,7 +36,7 @@ import {
   Check,
 } from 'lucide-react';
 import { supabase } from '../supabaseClient';
-import { supabaseFetch, isNetworkError, isRpcMissing, isUnknownColumn } from '../supabaseRequest';
+import { supabaseFetch, isNetworkError, isRpcMissing, isMissingPasswordColumn } from '../supabaseRequest';
 import { hashPassword, verifyTeacherPassword, getTeacherSecret, setTeacherSecret, clearTeacherSecret } from '../auth';
 import type { AppSettingsRow, BaseParams, ChannelKey, ChannelSimConfig, DecisionPayload, DecisionRow, GroupRow, OpenWeekRow, RoomTypeKey, WeekSubmissionRow } from '../types';
 import { WEEKS, resolveRoomTypes } from '../domain';
@@ -51,15 +51,18 @@ import MarketEnvironmentTab from './MarketEnvironmentTab';
 const CLASS_OPTIONS = ['酒管25088', '酒管25089', '酒管25090', '酒管25091'];
 
 /**
- * Insert groups, tolerating a database that does not have
- * `groups.password_plain` yet (it is (re)introduced by the batch-3 migration).
+ * Insert groups, tolerating a database that cannot accept
+ * `groups.password_plain` yet: either the column does not exist (batch-3
+ * migration not applied) or the column-level grant has not been widened
+ * (batch-2 grants applied on their own, which answer `permission denied`).
  * The plaintext only feeds the teacher's "小组密码" screen, so its absence must
- * never block creating a group: on an unknown-column error the row is retried
- * without it.
+ * never block creating a group: the row is retried without it, and the teacher
+ * can reset that group's password at any time.
  */
 async function insertGroups(rows: Array<Record<string, unknown>>) {
   const { error } = await supabase.from('groups').insert(rows);
-  if (error && isUnknownColumn(error)) {
+  const pendingPlaintextColumnRejected = isMissingPasswordColumn(error);
+  if (pendingPlaintextColumnRejected) {
     const stripped = rows.map((row) => {
       const copy: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(row)) {
@@ -520,7 +523,7 @@ export default function TeacherDashboard({ onLogout }: Props) {
       return true;
     } catch (err) {
       setPasswordsLoading(false);
-      if (isUnknownColumn(err)) {
+      if (isMissingPasswordColumn(err)) {
         setToast('密码查看功能尚未启用：请先在数据库应用最新迁移');
       } else if (isNetworkError(err)) {
         setToast('网络不佳，请检查网络后重试');

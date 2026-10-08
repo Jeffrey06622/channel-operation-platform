@@ -23,11 +23,12 @@ surface of the table:
    group passwords — the caller must also know the teacher password.
 
 ## Compatibility
-`ADD COLUMN IF NOT EXISTS` means existing plaintext values survive on a
-database where batch 2 was never applied; the backfill only fills rows that
-are still on the shared default. Rows whose password a student had already
-changed *and* whose plaintext was dropped by batch 2 cannot be recovered —
-they stay NULL and the interface shows "未知" with a hint to reset.
+`ADD COLUMN IF NOT EXISTS` means existing plaintext values survive. The batch-2
+migration no longer drops the column (it only removes it from the SELECT
+grant), so the two files can be applied in either order without losing data.
+Only if batch 2 had already been applied in its original form — i.e. the
+column really was dropped — are the plaintexts of customised passwords
+unrecoverable: those rows stay NULL and the interface shows "未记录（可重置）".
 
 ## Accepted risk
 Passwords remain recoverable (not hashed-only) by design, so that the teacher

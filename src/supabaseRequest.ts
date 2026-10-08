@@ -116,4 +116,15 @@ export function isUnknownColumn(err: unknown): boolean {
   return false;
 }
 
+/**
+ * True when the error means the database is not on the newest password
+ * migration: `groups.password_plain` is either absent, or present but not
+ * covered by the column-level grant (PostgREST reports that as 42501
+ * "permission denied"). Callers degrade gracefully instead of failing.
+ */
+export function isMissingPasswordColumn(err: unknown): boolean {
+  if (isUnknownColumn(err)) return true;
+  return !!err && (err as { code?: string }).code === '42501';
+}
+
 export { supabase };
