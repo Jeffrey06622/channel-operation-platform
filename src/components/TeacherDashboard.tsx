@@ -36,7 +36,7 @@ import {
   Check,
 } from 'lucide-react';
 import { supabase } from '../supabaseClient';
-import { supabaseFetch, isNetworkError, isRpcMissing, isMissingPasswordColumn } from '../supabaseRequest';
+import { supabaseFetch, isNetworkError, isRpcMissing, isMissingPasswordColumn, describeError } from '../supabaseRequest';
 import { hashPassword, verifyTeacherPassword, getTeacherSecret, setTeacherSecret, clearTeacherSecret } from '../auth';
 import type { AppSettingsRow, BaseParams, ChannelKey, ChannelSimConfig, DecisionPayload, DecisionRow, GroupRow, OpenWeekRow, RoomTypeKey, WeekSubmissionRow } from '../types';
 import { WEEKS, resolveRoomTypes } from '../domain';
@@ -183,10 +183,10 @@ export default function TeacherDashboard({ onLogout }: Props) {
       // throwing, so every read must be inspected explicitly.
       const readFailures: string[] = [];
       if (gRes.error) readFailures.push('小组列表：' + gRes.error.message);
-      if (dRes.error) readFailures.push('决策数据：' + dRes.error.message);
-      if (subRes.error) readFailures.push('提交记录：' + subRes.error.message);
-      if (settingsRes.error) readFailures.push('平台设置：' + settingsRes.error.message);
-      if (openRes.error) readFailures.push('开放周次：' + openRes.error.message);
+      if (dRes.error) readFailures.push('决策数据：' + describeError(dRes.error));
+      if (subRes.error) readFailures.push('提交记录：' + describeError(subRes.error));
+      if (settingsRes.error) readFailures.push('平台设置：' + describeError(settingsRes.error));
+      if (openRes.error) readFailures.push('开放周次：' + describeError(openRes.error));
       if (!settingsRes.data) readFailures.push('平台设置：未读取到配置记录');
       if (readFailures.length > 0) {
         setLoadError(readFailures.join('；'));

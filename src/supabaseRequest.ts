@@ -76,6 +76,25 @@ export function isNetworkError(err: unknown): boolean {
 }
 
 /**
+ * User-facing one-liner for an error. Transport-level failures (offline,
+ * TLS interference, timeout) are rewritten into actionable Chinese text —
+ * the raw browser message ("TypeError: Failed to fetch") tells students
+ * nothing. Database/business errors keep their original message.
+ */
+export function describeError(err: unknown): string {
+  if (!err) return '未知错误';
+  const message =
+    err instanceof Error ? err.message : String((err as { message?: unknown })?.message ?? err);
+  if (isNetworkError(err) || isTransportError(err)) {
+    if (/timeout|timed out|超时/i.test(message)) {
+      return '数据库请求超时：请检查网络后点「重新加载」重试';
+    }
+    return '无法连接数据库服务器：请切换网络（Wi-Fi ↔ 手机流量）后重试；若持续失败请告知老师';
+  }
+  return message;
+}
+
+/**
  * True when the error means "this RPC does not exist on the server yet".
  * The batch-2 database migration introduces verify_group_login /
  * change_group_password / change_teacher_password / reset_group_password.

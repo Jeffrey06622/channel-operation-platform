@@ -1,0 +1,14 @@
+# ── 数据库请求同源代理 ────────────────────────────────────────────────────────
+# 背景：*.supabase.co 在部分中国大陆网络中被按 SNI 精准阻断（TCP 能连通，但
+# 携带 supabase SNI 的 TLS 握手被重置），浏览器表现为 "TypeError: Failed to
+# fetch"；而本站本身由 Netlify 托管、可正常访问。因此把数据库流量改走本站
+# 自己的域名：/sb/* 在 Netlify 边缘节点转发到 Supabase 项目。
+#
+# 注意：转发目标必须与前端 Supabase 项目一致（supabaseClient.ts 中的
+# SUPABASE_REDIRECT_TARGET_HOST 亦同步维护）。
+
+[[redirects]]
+  from = "/sb/*"
+  to = "https://faldvtbftbiusovpchqb.supabase.co/:splat"
+  status = 200
+  force = true

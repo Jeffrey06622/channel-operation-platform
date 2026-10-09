@@ -41,7 +41,7 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { supabase } from '../supabaseClient';
-import { supabaseFetch, isNetworkError, isRpcMissing } from '../supabaseRequest';
+import { supabaseFetch, isNetworkError, isRpcMissing, describeError } from '../supabaseRequest';
 import { hashPassword } from '../auth';
 import {
   WEEKS,
@@ -296,10 +296,10 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
     // slipped through: the page carried on with built-in defaults, which could
     // rebuild saved channel data away and made locked weeks look editable.
     const readFailures: string[] = [];
-    if (settingsRes.error) readFailures.push('平台设置：' + settingsRes.error.message);
-    if (decRes.error) readFailures.push('决策数据：' + decRes.error.message);
-    if (subRes.error) readFailures.push('提交记录：' + subRes.error.message);
-    if (openRes.error) readFailures.push('开放周次：' + openRes.error.message);
+    if (settingsRes.error) readFailures.push('平台设置：' + describeError(settingsRes.error));
+    if (decRes.error) readFailures.push('决策数据：' + describeError(decRes.error));
+    if (subRes.error) readFailures.push('提交记录：' + describeError(subRes.error));
+    if (openRes.error) readFailures.push('开放周次：' + describeError(openRes.error));
     if (!settingsRes.data) readFailures.push('平台设置：未读取到配置记录');
     if (readFailures.length > 0) {
       setError('数据加载失败，已停止进入编辑状态以避免覆盖服务器数据');

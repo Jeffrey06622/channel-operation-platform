@@ -46,7 +46,9 @@ export default function LoginScreen({ onGroupLogin, onTeacherLogin }: Props) {
     } catch (err) {
       setGroupList([]);
       if (isNetworkError(err)) {
-        setError('网络不佳，请检查网络后重试');
+        setError(
+          '无法连接数据库服务器：请切换网络（Wi-Fi ↔ 手机流量）后刷新重试；若持续失败请告知老师',
+        );
       }
     } finally {
       setLoadingGroups(false);
