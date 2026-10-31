@@ -392,6 +392,8 @@ function emptyRoomTypeDecision(): RoomTypeDecision {
     weekend_days: [5, 6],
     weekday_price: null,
     weekend_price: null,
+    weekday_quota: null,
+    weekend_quota: null,
   };
 }
 

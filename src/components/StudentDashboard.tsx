@@ -2266,7 +2266,7 @@ function QuotaInput({
         value={value ?? ''}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
-        placeholder="0"
+        placeholder="未填写"
         className={cn(
           'w-full px-2 py-1.5 text-sm border rounded-lg text-center transition',
           error
@@ -2476,21 +2476,24 @@ function HistoryReview({ payload, cycleResult, submittedWeeks, baseParams }: His
                           if (cell.weekend_pricing_enabled === true) {
                             const wd = cell.weekday_price ?? cell.price;
                             const we = cell.weekend_price ?? cell.price;
-                            return wd != null && we != null ? `¥${wd}/${we}` : '—';
+                            return wd != null && we != null ? `¥${wd}/${we}` : '未填写';
                           }
-                          return cell.price != null ? `¥${cell.price}` : '—';
+                          return cell.price != null ? `¥${cell.price}` : '未填写';
                         })()}
                       </td>
                       <td className="px-2 py-2 text-right text-slate-600">
                         {(() => {
                           const cell = weekDecision.channels[ch.channelKey]?.roomTypes?.[rt.roomTypeKey];
-                          if (!cell) return '0间';
+                          const missing = <span className="text-amber-600">未填写</span>;
+                          if (!cell) return missing;
                           if (cell.weekend_pricing_enabled === true) {
-                            const wd = cell.weekday_quota ?? cell.quota ?? 0;
-                            const we = cell.weekend_quota ?? cell.quota ?? 0;
-                            return `${wd}/${we}间`;
+                            const wd = cell.weekday_quota ?? cell.quota;
+                            const we = cell.weekend_quota ?? cell.quota;
+                            if (wd == null && we == null) return missing;
+                            return `${wd ?? '—'}/${we ?? '—'}间`;
                           }
-                          return `${cell.quota ?? 0}间`;
+                          if (cell.quota == null) return missing;
+                          return `${cell.quota}间`;
                         })()}
                       </td>
                       <td className="px-2 py-2 text-right font-medium text-slate-700">

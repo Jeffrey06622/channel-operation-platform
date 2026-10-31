@@ -402,7 +402,8 @@ export default function TeacherDashboard({ onLogout }: Props) {
             for (const rtKey of Object.keys(ch.roomTypes)) {
               const rt = ch.roomTypes[rtKey as RoomTypeKey];
               if (!rt) continue;
-              if ((rt.price ?? 0) > 0 || (rt.quota ?? 0) > 0 || (rt.weekday_price ?? 0) > 0 || (rt.weekend_price ?? 0) > 0) {
+              const q = rt.quota ?? rt.weekday_quota ?? rt.weekend_quota;
+              if ((rt.price ?? 0) > 0 || (q ?? 0) > 0 || (rt.weekday_price ?? 0) > 0 || (rt.weekend_price ?? 0) > 0) {
                 hasData = true;
                 break;
               }
