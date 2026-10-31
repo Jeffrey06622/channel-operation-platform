@@ -489,7 +489,7 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
     weekKey: string,
     channelKey: ChannelKey,
     roomTypeKey: RoomTypeKey,
-    field: 'price' | 'quota',
+    field: 'price' | 'quota' | 'weekday_quota' | 'weekend_quota',
     value: string,
   ) {
     if (!isWeekEditable(weekKey)) return;
@@ -546,8 +546,13 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
           }
           if (rt.weekday_price == null) rt.weekday_price = rt.price;
           if (rt.weekend_price == null) rt.weekend_price = rt.price;
+          // 拆分配额：开启周末价时用原配额作为两个周期的初始值（历史数据回显）。
+          if (rt.weekday_quota == null) rt.weekday_quota = rt.quota;
+          if (rt.weekend_quota == null) rt.weekend_quota = rt.quota;
         } else {
           rt.weekend_pricing_enabled = false;
+          // 关闭周末价时，把已填的工作日配额折回单一配额，避免数值丢失。
+          if (rt.weekday_quota != null) rt.quota = rt.weekday_quota;
           rt.weekend_days = [];
         }
         return next;
@@ -1622,7 +1627,7 @@ interface WeekFormProps {
     weekKey: string,
     channelKey: ChannelKey,
     roomTypeKey: RoomTypeKey,
-    field: 'price' | 'quota',
+    field: 'price' | 'quota' | 'weekday_quota' | 'weekend_quota',
     value: string,
   ) => void;
   onToggleFactor: (weekKey: string, factorKey: string) => void;
@@ -1828,15 +1833,26 @@ function WeekForm({
                             onUpdatePrice={onUpdateWeekendPrice}
                             specialFactorsActive={hasActiveSpecialFactors(weekDecision.specialFactors)}
                           />
-                          <div className="flex items-center gap-2 pt-1">
-                            <span className="text-xs text-slate-500 w-16 shrink-0">配额</span>
-                            <QuotaInput
-                              value={rtDec.quota}
-                              onChange={(v) => onChannelUpdate(weekKey, ch.key, rt.key, 'quota', v)}
-                              disabled={disabled}
-                              error={qErr}
-                            />
-                            <span className="text-xs text-slate-400">间 · 该渠道本房型每周可售量</span>
+                          <div className="flex items-center gap-4 flex-wrap pt-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-slate-500 w-16 shrink-0">工作日配额</span>
+                              <QuotaInput
+                                value={rtDec.weekday_quota ?? rtDec.quota}
+                                onChange={(v) => onChannelUpdate(weekKey, ch.key, rt.key, 'weekday_quota', v)}
+                                disabled={disabled}
+                                error={quotaError(rtDec.weekday_quota ?? rtDec.quota, rt.inventory)}
+                              />
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-slate-500 w-16 shrink-0">周末配额</span>
+                              <QuotaInput
+                                value={rtDec.weekend_quota ?? rtDec.quota}
+                                onChange={(v) => onChannelUpdate(weekKey, ch.key, rt.key, 'weekend_quota', v)}
+                                disabled={disabled}
+                                error={quotaError(rtDec.weekend_quota ?? rtDec.quota, rt.inventory)}
+                              />
+                            </div>
+                            <span className="text-xs text-slate-400">间 · 工作日与周末的可售量分别填写</span>
                           </div>
                         </>
                       ) : (
@@ -2454,10 +2470,28 @@ function HistoryReview({ payload, cycleResult, submittedWeeks, baseParams }: His
                       )}
                       <td className="px-2 py-2 text-center text-slate-500">{rt.roomTypeName}</td>
                       <td className="px-2 py-2 text-right text-slate-600">
-                        ¥{weekDecision.channels[ch.channelKey].roomTypes[rt.roomTypeKey].price}
+                        {(() => {
+                          const cell = weekDecision.channels[ch.channelKey]?.roomTypes?.[rt.roomTypeKey];
+                          if (!cell) return '—';
+                          if (cell.weekend_pricing_enabled === true) {
+                            const wd = cell.weekday_price ?? cell.price;
+                            const we = cell.weekend_price ?? cell.price;
+                            return wd != null && we != null ? `¥${wd}/${we}` : '—';
+                          }
+                          return cell.price != null ? `¥${cell.price}` : '—';
+                        })()}
                       </td>
                       <td className="px-2 py-2 text-right text-slate-600">
-                        {weekDecision.channels[ch.channelKey].roomTypes[rt.roomTypeKey].quota}间
+                        {(() => {
+                          const cell = weekDecision.channels[ch.channelKey]?.roomTypes?.[rt.roomTypeKey];
+                          if (!cell) return '0间';
+                          if (cell.weekend_pricing_enabled === true) {
+                            const wd = cell.weekday_quota ?? cell.quota ?? 0;
+                            const we = cell.weekend_quota ?? cell.quota ?? 0;
+                            return `${wd}/${we}间`;
+                          }
+                          return `${cell.quota ?? 0}间`;
+                        })()}
                       </td>
                       <td className="px-2 py-2 text-right font-medium text-slate-700">
                         ¥{Math.round(rt.netRevenue).toLocaleString()}

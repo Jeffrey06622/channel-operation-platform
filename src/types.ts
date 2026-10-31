@@ -73,6 +73,10 @@ export interface RoomTypeDecision {
   weekend_days?: number[];
   weekday_price?: number | null;
   weekend_price?: number | null;
+  // 周末价模式下的拆分配额：工作日与周末分别填写。
+  // 历史数据只有 quota，读取时按 weekday_quota ?? quota 回退回显。
+  weekday_quota?: number | null;
+  weekend_quota?: number | null;
 }
 
 export interface ChannelDecision {

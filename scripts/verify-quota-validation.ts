@@ -146,9 +146,98 @@ for (const ch of CHANNELS) {
 }
 const prodErrors = validateWeek(productionCase, 'wk5');
 assert(
-  prodErrors.length === 18 && prodErrors.every((e) => e.includes('配额未填写')),
-  '旧版本可提交的同一份数据 -> 现在 18 条配额错误，无法提交',
-  `实际 ${prodErrors.length} 条`,
+  prodErrors.length === 36 &&
+    prodErrors.every((e) => e.includes('配额未填写')) &&
+    prodErrors.filter((e) => e.includes('工作日配额')).length === 18 &&
+    prodErrors.filter((e) => e.includes('周末配额')).length === 18,
+  '旧版本可提交的同一份数据 -> 现在 36 条配额错误（工作日+周末各18），无法提交',
+  `实际 ${prodErrors.length} 条：${prodErrors[0] ?? '-'}`,
+);
+
+// ─── 4. Weekend split quotas (工作日/周末配额分别填写) ───────────────────────
+section('4. 周末价模式：工作日配额与周末配额分别校验');
+
+type SplitMap = {
+  wd?: Partial<Record<RoomTypeKey, number | null>>;
+  we?: Partial<Record<RoomTypeKey, number | null>>;
+  legacy?: Partial<Record<RoomTypeKey, number | null>>;
+};
+
+function buildWeekendWeek(split: SplitMap): DecisionPayload {
+  const payload = emptyDecisionPayload(CHANNELS, ROOM_TYPES);
+  const week = payload.weeks.wk5;
+  for (const ch of CHANNELS) {
+    for (const rt of ROOM_TYPES) {
+      week.channels[ch.key].roomTypes[rt.key] = {
+        price: null,
+        quota: split.legacy && rt.key in split.legacy ? (split.legacy[rt.key] as number | null) : null,
+        weekend_pricing_enabled: true,
+        weekend_days: [5, 6],
+        weekday_price: 1000,
+        weekend_price: 1200,
+        ...(split.wd && rt.key in split.wd ? { weekday_quota: split.wd[rt.key] as number | null } : {}),
+        ...(split.we && rt.key in split.we ? { weekend_quota: split.we[rt.key] as number | null } : {}),
+      };
+    }
+  }
+  return payload;
+}
+
+// 4.1 历史数据回显：只有旧版 quota 时，两个周期都回退到它 -> 可提交。
+const legacyOnly = validateWeek(buildWeekendWeek({ legacy: BASELINE }), 'wk5');
+assert(
+  legacyOnly.length === 0,
+  '历史数据（只有旧版 quota）-> 回退回显，可提交',
+  legacyOnly.join(' | '),
+);
+
+// 4.2 工作日配额超房量：930 > 50 -> 拦截并指明「工作日配额」。
+const wdOver = validateWeek(
+  buildWeekendWeek({ wd: { superior: 930, deluxe: 6, suite: 1 }, we: BASELINE }),
+  'wk5',
+);
+assert(
+  wdOver.some((e) => e.includes('工作日配额') && e.includes('超过该房型房量 50 间')),
+  '工作日配额 930 > 房量 50 -> 拦截',
+  wdOver.join(' | '),
+);
+
+// 4.3 周末配额为 0 -> 拦截并指明「周末配额」。
+const weZero = validateWeek(
+  buildWeekendWeek({ wd: BASELINE, we: { superior: 0, deluxe: 6, suite: 1 } }),
+  'wk5',
+);
+assert(
+  weZero.some((e) => e.includes('周末配额') && e.includes('不能为 0 或负数')),
+  '周末配额为 0 -> 拦截',
+  weZero.join(' | '),
+);
+
+// 4.4 工作日配额缺失（无旧版 quota 兜底）-> 拦截。
+const wdMissing = validateWeek(buildWeekendWeek({ we: BASELINE }), 'wk5');
+assert(
+  wdMissing.some((e) => e.includes('工作日配额') && e.includes('未填写')),
+  '工作日配额缺失 -> 拦截',
+  wdMissing.join(' | '),
+);
+
+// 4.5 拆分配额正常值：工作日 8/6/1，周末 8/6/1 -> 可提交。
+const splitOk = validateWeek(buildWeekendWeek({ wd: BASELINE, we: BASELINE }), 'wk5');
+assert(
+  splitOk.length === 0,
+  '工作日与周末配额均为正常值 -> 无错误，可提交',
+  splitOk.join(' | '),
+);
+
+// 4.6 周末配额按房型汇总：各渠道周末 9 × 6 = 54 > 50 -> 按房型房量拦截。
+const weAggregate = validateWeek(
+  buildWeekendWeek({ wd: BASELINE, we: { superior: 9, deluxe: 6, suite: 1 } }),
+  'wk5',
+);
+assert(
+  weAggregate.some((e) => e.includes('周末配额之和 54') && e.includes('超过该房型房量 50 间')),
+  '各渠道周末配额之和 54 > 50 -> 按房型房量拦截',
+  weAggregate.join(' | '),
 );
 
 console.log(`\n结果：${checks - failures}/${checks} 通过，${failures} 失败`);

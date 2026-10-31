@@ -7,6 +7,7 @@ import type {
   ChannelSimParams,
   CycleResult,
   DecisionPayload,
+  RoomTypeDecision,
   RoomTypeKey,
   RoomTypeMeta,
   RoomTypeResult,
@@ -185,10 +186,39 @@ function computeWeekTransactions(
   for (const channel of channels) {
     const channelDec = weekDecision?.channels?.[channel.key] ?? emptyChannelDecision(roomTypes);
     const simParams = resolveChannelSimParams(channel.key, simConfig);
-    const totalChannelQuota = roomTypes.reduce(
-      (s, rt) => s + (channelDec.roomTypes[rt.key].quota ?? 0),
-      0,
-    );
+
+    // Per-room-type split quotas: in weekend-pricing mode the weekday and
+    // weekend quotas each apply to their own days, so the week's allocated
+    // room-nights are day-weighted (weekday_quota × 工作日天数 + weekend_quota × 周末天数).
+    const splits = roomTypes.map((roomType) => {
+      const rtDec = channelDec.roomTypes[roomType.key] ?? fallbackRoomTypeDecision();
+      const weekendActive =
+        rtDec.weekend_pricing_enabled === true &&
+        Array.isArray(rtDec.weekend_days) &&
+        rtDec.weekend_days.length > 0;
+      const wdQ = (weekendActive ? rtDec.weekday_quota ?? rtDec.quota : rtDec.quota) ?? 0;
+      const weQ = (weekendActive ? rtDec.weekend_quota ?? rtDec.quota : rtDec.quota) ?? 0;
+      const { weekdayDays, weekendDays } = weekendActive
+        ? countWeekdayWeekendDays(weekKey, new Set(rtDec.weekend_days ?? []))
+        : { weekdayDays: days, weekendDays: 0 };
+      const allocatedRn = wdQ * weekdayDays + weQ * weekendDays;
+
+      // Average price across the week (handling weekend pricing)
+      let avgPrice = rtDec.price ?? 0;
+      if (
+        weekendActive &&
+        rtDec.weekday_price != null &&
+        rtDec.weekend_price != null
+      ) {
+        avgPrice =
+          (rtDec.weekday_price * weekdayDays + rtDec.weekend_price * weekendDays) / days;
+      }
+
+      return { roomType, rtDec, allocatedRn, avgPrice };
+    });
+
+    // Per-day channel quota, used for content/ad cost scaling.
+    const totalChannelQuota = splits.reduce((s, x) => s + x.allocatedRn, 0) / days;
 
     // Determine viral status for this channel this week
     const viralRoll = rng();
@@ -208,34 +238,16 @@ function computeWeekTransactions(
     const contentCost =
       simParams.weeklyFixedCost + totalChannelQuota * simParams.perRoomNightCost;
 
-    for (const roomType of roomTypes) {
-      const rtDec = channelDec.roomTypes[roomType.key] ?? fallbackRoomTypeDecision();
-      const quota = rtDec.quota ?? 0;
+    for (const { roomType, rtDec, allocatedRn, avgPrice } of splits) {
       const rtBasePrice = channel.basePrice * roomType.priceMultiplier;
 
-      // Calculate average price (handling weekend pricing)
-      let avgPrice = rtDec.price ?? 0;
-      if (
-        rtDec.weekend_pricing_enabled === true &&
-        rtDec.weekday_price != null &&
-        rtDec.weekend_price != null &&
-        Array.isArray(rtDec.weekend_days) &&
-        rtDec.weekend_days.length > 0
-      ) {
-        const weekendSet = new Set(rtDec.weekend_days);
-        const { weekdayDays, weekendDays } = countWeekdayWeekendDays(weekKey, weekendSet);
-        const wdPrice = rtDec.weekday_price;
-        const wePrice = rtDec.weekend_price;
-        avgPrice = (wdPrice * weekdayDays + wePrice * weekendDays) / days;
-      }
-
-      if (quota <= 0 || avgPrice <= 0) {
+      if (allocatedRn <= 0 || avgPrice <= 0) {
         results.push({
           channelKey: channel.key,
           channelName: channel.name,
           roomTypeKey: roomType.key,
           roomTypeName: roomType.name,
-          allocatedQuota: quota * days,
+          allocatedQuota: allocatedRn,
           avgPrice: 0,
           basePrice: rtBasePrice,
           theoreticalRn: 0,
@@ -249,8 +261,6 @@ function computeWeekTransactions(
         });
         continue;
       }
-
-      const allocatedRn = quota * days;
 
       // M6: Price competitiveness
       const priceComp = priceCompetitiveness(avgPrice, rtBasePrice, simConfig.priceSensitivity);
@@ -345,9 +355,15 @@ function computeWeekResult(
       const simParams = resolveChannelSimParams(entry.channelKey, simConfig);
       const totalChannelQuota = weekDecision?.channels?.[entry.channelKey]
         ? roomTypes.reduce(
-            (s, rt) => s + (weekDecision.channels[entry.channelKey]?.roomTypes?.[rt.key]?.quota ?? 0),
+            (s, rt) =>
+              s +
+              effectiveCellRoomNights(
+                weekDecision.channels[entry.channelKey]?.roomTypes?.[rt.key],
+                weekKey,
+                days,
+              ),
             0,
-          ) * days
+          )
         : 0;
       const capPortion = totalChannelQuota > 0 ? 1 / channels.length : 0;
       // Simplified: pending releases still subject to traffic cap
@@ -594,17 +610,67 @@ export function computeCycle(
   };
 }
 
+/**
+ * Effective split quotas for one channel x room type cell.
+ *
+ * In weekend-pricing mode the weekday and weekend quotas are filled separately
+ * (weekday_quota / weekend_quota). Historical cells only carry the legacy
+ * single `quota`, so both periods fall back to it — old submitted weeks keep
+ * echoing correctly without any data migration.
+ */
+export function splitQuotas(rtDec: RoomTypeDecision | null | undefined): {
+  weekday: number | null;
+  weekend: number | null;
+} {
+  if (!rtDec) return { weekday: null, weekend: null };
+  if (rtDec.weekend_pricing_enabled === true) {
+    return {
+      weekday: rtDec.weekday_quota ?? rtDec.quota ?? null,
+      weekend: rtDec.weekend_quota ?? rtDec.quota ?? null,
+    };
+  }
+  return { weekday: rtDec.quota ?? null, weekend: rtDec.quota ?? null };
+}
+
+/**
+ * Total room-nights one cell contributes across the week's days, honoring the
+ * weekday/weekend quota split (each quota applies to its own days).
+ */
+export function effectiveCellRoomNights(
+  rtDec: RoomTypeDecision | null | undefined,
+  weekKey: string,
+  days: number,
+): number {
+  if (!rtDec) return 0;
+  const { weekday, weekend } = splitQuotas(rtDec);
+  if (rtDec.weekend_pricing_enabled === true && Array.isArray(rtDec.weekend_days) && rtDec.weekend_days.length > 0) {
+    const { weekdayDays, weekendDays } = countWeekdayWeekendDays(weekKey, new Set(rtDec.weekend_days));
+    return (weekday ?? 0) * weekdayDays + (weekend ?? 0) * weekendDays;
+  }
+  return (weekday ?? 0) * days;
+}
+
 export function weekQuotaTotal(weekDecision: WeekDecision, overrides?: BaseParams | null): number {
-  return resolveChannels(overrides).reduce((sum, c) => {
+  // 周末拆分配额下，工作日与周末各自受房量约束；对外展示与校验取两者较大值。
+  const { weekday, weekend } = weekQuotaTotalsSplit(weekDecision, overrides);
+  return Math.max(weekday, weekend);
+}
+
+export function weekQuotaTotalsSplit(
+  weekDecision: WeekDecision,
+  overrides?: BaseParams | null,
+): { weekday: number; weekend: number } {
+  let wdTotal = 0;
+  let weTotal = 0;
+  for (const c of resolveChannels(overrides)) {
     const ch = weekDecision?.channels?.[c.key];
-    return (
-      sum +
-      resolveRoomTypes(overrides).reduce(
-        (s, rt) => s + (ch?.roomTypes?.[rt.key]?.quota ?? 0),
-        0,
-      )
-    );
-  }, 0);
+    for (const rt of resolveRoomTypes(overrides)) {
+      const { weekday, weekend } = splitQuotas(ch?.roomTypes?.[rt.key]);
+      wdTotal += weekday ?? 0;
+      weTotal += weekend ?? 0;
+    }
+  }
+  return { weekday: wdTotal, weekend: weTotal };
 }
 
 export function roomTypeQuotaTotal(
@@ -612,10 +678,23 @@ export function roomTypeQuotaTotal(
   roomTypeKey: RoomTypeKey,
   overrides?: BaseParams | null,
 ): number {
-  return resolveChannels(overrides).reduce((sum, c) => {
-    const ch = weekDecision?.channels?.[c.key];
-    return sum + (ch?.roomTypes?.[roomTypeKey]?.quota ?? 0);
-  }, 0);
+  const { weekday, weekend } = roomTypeQuotaTotalsSplit(weekDecision, roomTypeKey, overrides);
+  return Math.max(weekday, weekend);
+}
+
+export function roomTypeQuotaTotalsSplit(
+  weekDecision: WeekDecision,
+  roomTypeKey: RoomTypeKey,
+  overrides?: BaseParams | null,
+): { weekday: number; weekend: number } {
+  let wdTotal = 0;
+  let weTotal = 0;
+  for (const c of resolveChannels(overrides)) {
+    const { weekday, weekend } = splitQuotas(weekDecision?.channels?.[c.key]?.roomTypes?.[roomTypeKey]);
+    wdTotal += weekday ?? 0;
+    weTotal += weekend ?? 0;
+  }
+  return { weekday: wdTotal, weekend: weTotal };
 }
 
 export function priceError(
@@ -692,7 +771,10 @@ export function isWeekBlank(
     for (const rt of roomTypes) {
       const rtDec = cd.roomTypes?.[rt.key];
       if (!rtDec) continue;
-      const quotaFilled = rtDec.quota !== null && rtDec.quota !== undefined;
+      const quotaFilled =
+        rtDec.quota !== null && rtDec.quota !== undefined
+        || rtDec.weekday_quota !== null && rtDec.weekday_quota !== undefined
+        || rtDec.weekend_quota !== null && rtDec.weekend_quota !== undefined;
       const priceFilled =
         rtDec.weekend_pricing_enabled === true
           ? rtDec.weekday_price != null || rtDec.weekend_price != null
@@ -714,17 +796,27 @@ export function validateWeek(payload: DecisionPayload, weekKey: string, override
   const roomTypes = resolveRoomTypes(overrides);
   const totalRooms = resolveTotalRooms(overrides);
 
-  const qTotal = weekQuotaTotal(wd, overrides);
-  if (qTotal > totalRooms) {
+  const qTotals = weekQuotaTotalsSplit(wd, overrides);
+  if (qTotals.weekday > totalRooms) {
     errors.push(
-      `各渠道配额之和 ${qTotal} 间超过总房量 ${totalRooms} 间`,
+      `各渠道工作日配额之和 ${qTotals.weekday} 间超过总房量 ${totalRooms} 间`,
+    );
+  }
+  if (qTotals.weekend > totalRooms) {
+    errors.push(
+      `各渠道周末配额之和 ${qTotals.weekend} 间超过总房量 ${totalRooms} 间`,
     );
   }
   for (const rt of roomTypes) {
-    const rtTotal = roomTypeQuotaTotal(wd, rt.key, overrides);
-    if (rtTotal > rt.inventory) {
+    const rtTotals = roomTypeQuotaTotalsSplit(wd, rt.key, overrides);
+    if (rtTotals.weekday > rt.inventory) {
       errors.push(
-        `${rt.name}：各渠道配额之和 ${rtTotal} 间超过该房型房量 ${rt.inventory} 间`,
+        `${rt.name}：各渠道工作日配额之和 ${rtTotals.weekday} 间超过该房型房量 ${rt.inventory} 间`,
+      );
+    }
+    if (rtTotals.weekend > rt.inventory) {
+      errors.push(
+        `${rt.name}：各渠道周末配额之和 ${rtTotals.weekend} 间超过该房型房量 ${rt.inventory} 间`,
       );
     }
   }
@@ -771,8 +863,18 @@ export function validateWeek(payload: DecisionPayload, weekKey: string, override
       // Quota is a required decision, validated at the same stage as the price:
       // missing, 0/negative, non-integer and out-of-range values all block the
       // submission. Mirrors the server-side rule in migration 20261019100000.
-      const qErr = quotaSubmissionError(rtDec.quota, rt.inventory);
-      if (qErr) errors.push(`${ch.name}-${rt.name}：${qErr}`);
+      if (rtDec.weekend_pricing_enabled === true) {
+        // 周末价模式：工作日与周末配额分别必填（历史数据回退到单一 quota）。
+        const wdQ = rtDec.weekday_quota ?? rtDec.quota;
+        const weQ = rtDec.weekend_quota ?? rtDec.quota;
+        const wdQErr = quotaSubmissionError(wdQ, rt.inventory);
+        if (wdQErr) errors.push(`${ch.name}-${rt.name}工作日配额：${wdQErr}`);
+        const weQErr = quotaSubmissionError(weQ, rt.inventory);
+        if (weQErr) errors.push(`${ch.name}-${rt.name}周末配额：${weQErr}`);
+      } else {
+        const qErr = quotaSubmissionError(rtDec.quota, rt.inventory);
+        if (qErr) errors.push(`${ch.name}-${rt.name}：${qErr}`);
+      }
     }
   }
   return errors;
@@ -786,17 +888,27 @@ export function validateAll(payload: DecisionPayload, overrides?: BaseParams | n
   for (const week of WEEKS) {
     const wd = payload.weeks[week.key];
     if (!wd) continue;
-    const qTotal = weekQuotaTotal(wd, overrides);
-    if (qTotal > totalRooms) {
+    const qTotals = weekQuotaTotalsSplit(wd, overrides);
+    if (qTotals.weekday > totalRooms) {
       errors.push(
-        `第${week.index}周 (${week.label})：各渠道配额之和 ${qTotal} 间超过总房量 ${totalRooms} 间`,
+        `第${week.index}周 (${week.label})：各渠道工作日配额之和 ${qTotals.weekday} 间超过总房量 ${totalRooms} 间`,
+      );
+    }
+    if (qTotals.weekend > totalRooms) {
+      errors.push(
+        `第${week.index}周 (${week.label})：各渠道周末配额之和 ${qTotals.weekend} 间超过总房量 ${totalRooms} 间`,
       );
     }
     for (const rt of roomTypes) {
-      const rtTotal = roomTypeQuotaTotal(wd, rt.key, overrides);
-      if (rtTotal > rt.inventory) {
+      const rtTotals = roomTypeQuotaTotalsSplit(wd, rt.key, overrides);
+      if (rtTotals.weekday > rt.inventory) {
         errors.push(
-          `第${week.index}周 · ${rt.name}：各渠道配额之和 ${rtTotal} 间超过该房型房量 ${rt.inventory} 间`,
+          `第${week.index}周 · ${rt.name}：各渠道工作日配额之和 ${rtTotals.weekday} 间超过该房型房量 ${rt.inventory} 间`,
+        );
+      }
+      if (rtTotals.weekend > rt.inventory) {
+        errors.push(
+          `第${week.index}周 · ${rt.name}：各渠道周末配额之和 ${rtTotals.weekend} 间超过该房型房量 ${rt.inventory} 间`,
         );
       }
     }
@@ -821,8 +933,17 @@ export function validateAll(payload: DecisionPayload, overrides?: BaseParams | n
           const pErr = priceError(ch.key, rt.key, rtDec.price, overrides);
           if (pErr) errors.push(`第${week.index}周 · ${ch.name}-${rt.name}：${pErr}`);
         }
-        const qErr = quotaSubmissionError(rtDec.quota, rt.inventory);
-        if (qErr) errors.push(`第${week.index}周 · ${ch.name}-${rt.name}：${qErr}`);
+        if (rtDec.weekend_pricing_enabled === true) {
+          const wdQ = rtDec.weekday_quota ?? rtDec.quota;
+          const weQ = rtDec.weekend_quota ?? rtDec.quota;
+          const wdQErr = quotaSubmissionError(wdQ, rt.inventory);
+          if (wdQErr) errors.push(`第${week.index}周 · ${ch.name}-${rt.name}工作日配额：${wdQErr}`);
+          const weQErr = quotaSubmissionError(weQ, rt.inventory);
+          if (weQErr) errors.push(`第${week.index}周 · ${ch.name}-${rt.name}周末配额：${weQErr}`);
+        } else {
+          const qErr = quotaSubmissionError(rtDec.quota, rt.inventory);
+          if (qErr) errors.push(`第${week.index}周 · ${ch.name}-${rt.name}：${qErr}`);
+        }
       }
     }
   }

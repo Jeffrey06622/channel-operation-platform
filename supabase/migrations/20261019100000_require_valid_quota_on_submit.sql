@@ -71,6 +71,12 @@ BEGIN
       IF (v_cell -> 'quota') IS NOT NULL AND (v_cell -> 'quota') <> 'null'::jsonb THEN
         RETURN true;
       END IF;
+      IF (v_cell -> 'weekday_quota') IS NOT NULL AND (v_cell -> 'weekday_quota') <> 'null'::jsonb THEN
+        RETURN true;
+      END IF;
+      IF (v_cell -> 'weekend_quota') IS NOT NULL AND (v_cell -> 'weekend_quota') <> 'null'::jsonb THEN
+        RETURN true;
+      END IF;
       IF (v_cell -> 'price') IS NOT NULL AND (v_cell -> 'price') <> 'null'::jsonb THEN
         RETURN true;
       END IF;
@@ -113,6 +119,7 @@ DECLARE
   v_cell        jsonb;
   v_cell_ch     jsonb;
   v_quota       numeric;
+  v_label       text;
   v_sum         numeric;
   v_ch_names    text[] := ARRAY['携程','美团','协议客','直销','抖音','小红书'];
 BEGIN
@@ -183,27 +190,72 @@ BEGIN
         RETURN format('%s-%s：尚未填写配额', v_ch_name, v_rt_name);
       END IF;
 
-      IF (v_cell -> 'quota') IS NULL OR jsonb_typeof(v_cell -> 'quota') <> 'number' THEN
-        RETURN format('%s-%s：配额未填写', v_ch_name, v_rt_name);
-      END IF;
+      -- 周末价模式下工作日/周末配额分别校验（缺省回退到旧版单一 quota，
+      -- 与前端 splitQuotas 的回显逻辑一致）；普通模式只校验 quota。
+      IF (v_cell -> 'weekend_pricing_enabled') = 'true'::jsonb THEN
+        -- ── 工作日配额 ──
+        IF (v_cell -> 'weekday_quota') IS NOT NULL AND jsonb_typeof(v_cell -> 'weekday_quota') = 'number' THEN
+          v_quota := (v_cell ->> 'weekday_quota')::numeric;
+          v_label := '工作日配额';
+        ELSIF (v_cell -> 'quota') IS NOT NULL AND jsonb_typeof(v_cell -> 'quota') = 'number' THEN
+          v_quota := (v_cell ->> 'quota')::numeric;
+          v_label := '工作日配额(沿用原配额)';
+        ELSE
+          RETURN format('%s-%s：工作日配额未填写', v_ch_name, v_rt_name);
+        END IF;
+        IF v_quota <> trunc(v_quota) THEN
+          RETURN format('%s-%s：%s需为整数（当前 %s）', v_ch_name, v_rt_name, v_label, v_quota);
+        END IF;
+        IF v_quota <= 0 THEN
+          RETURN format('%s-%s：%s不能为 0 或负数（当前 %s）', v_ch_name, v_rt_name, v_label, v_quota);
+        END IF;
+        IF v_quota > v_inv THEN
+          RETURN format('%s-%s：%s %s 间超过该房型房量 %s 间', v_ch_name, v_rt_name, v_label, v_quota, v_inv);
+        END IF;
 
-      v_quota := (v_cell ->> 'quota')::numeric;
+        -- ── 周末配额 ──
+        IF (v_cell -> 'weekend_quota') IS NOT NULL AND jsonb_typeof(v_cell -> 'weekend_quota') = 'number' THEN
+          v_quota := (v_cell ->> 'weekend_quota')::numeric;
+          v_label := '周末配额';
+        ELSIF (v_cell -> 'quota') IS NOT NULL AND jsonb_typeof(v_cell -> 'quota') = 'number' THEN
+          v_quota := (v_cell ->> 'quota')::numeric;
+          v_label := '周末配额(沿用原配额)';
+        ELSE
+          RETURN format('%s-%s：周末配额未填写', v_ch_name, v_rt_name);
+        END IF;
+        IF v_quota <> trunc(v_quota) THEN
+          RETURN format('%s-%s：%s需为整数（当前 %s）', v_ch_name, v_rt_name, v_label, v_quota);
+        END IF;
+        IF v_quota <= 0 THEN
+          RETURN format('%s-%s：%s不能为 0 或负数（当前 %s）', v_ch_name, v_rt_name, v_label, v_quota);
+        END IF;
+        IF v_quota > v_inv THEN
+          RETURN format('%s-%s：%s %s 间超过该房型房量 %s 间', v_ch_name, v_rt_name, v_label, v_quota, v_inv);
+        END IF;
+      ELSE
+        IF (v_cell -> 'quota') IS NULL OR jsonb_typeof(v_cell -> 'quota') <> 'number' THEN
+          RETURN format('%s-%s：配额未填写', v_ch_name, v_rt_name);
+        END IF;
 
-      IF v_quota <> trunc(v_quota) THEN
-        RETURN format('%s-%s：配额需为整数（当前 %s）', v_ch_name, v_rt_name, v_quota);
-      END IF;
+        v_quota := (v_cell ->> 'quota')::numeric;
 
-      IF v_quota <= 0 THEN
-        RETURN format('%s-%s：配额不能为 0 或负数（当前 %s）', v_ch_name, v_rt_name, v_quota);
-      END IF;
+        IF v_quota <> trunc(v_quota) THEN
+          RETURN format('%s-%s：配额需为整数（当前 %s）', v_ch_name, v_rt_name, v_quota);
+        END IF;
 
-      IF v_quota > v_inv THEN
-        RETURN format('%s-%s：配额 %s 间超过该房型房量 %s 间', v_ch_name, v_rt_name, v_quota, v_inv);
+        IF v_quota <= 0 THEN
+          RETURN format('%s-%s：配额不能为 0 或负数（当前 %s）', v_ch_name, v_rt_name, v_quota);
+        END IF;
+
+        IF v_quota > v_inv THEN
+          RETURN format('%s-%s：配额 %s 间超过该房型房量 %s 间', v_ch_name, v_rt_name, v_quota, v_inv);
+        END IF;
       END IF;
     END LOOP;
   END LOOP;
 
   -- Aggregate rule: per room type, quotas summed over all channels <= inventory.
+  -- 周末价模式下工作日与周末分别汇总校验（缺省回退到旧版 quota）。
   FOR v_j IN 1 .. coalesce(array_length(v_room_types, 1), 0) LOOP
     v_rt_key := v_room_types[v_j];
     v_rt_name := coalesce(v_names[v_j], v_rt_key);
@@ -211,12 +263,39 @@ BEGIN
     v_sum := 0;
     FOR v_i IN 1 .. coalesce(array_length(v_channels, 1), 0) LOOP
       v_cell := p_week_data -> 'channels' -> v_channels[v_i] -> 'roomTypes' -> v_rt_key;
-      IF v_cell IS NOT NULL AND jsonb_typeof(v_cell -> 'quota') = 'number' THEN
-        v_sum := v_sum + (v_cell ->> 'quota')::numeric;
+      IF v_cell IS NOT NULL AND jsonb_typeof(v_cell) = 'object' THEN
+        IF (v_cell -> 'weekend_pricing_enabled') = 'true'::jsonb THEN
+          IF (v_cell -> 'weekday_quota') IS NOT NULL AND jsonb_typeof(v_cell -> 'weekday_quota') = 'number' THEN
+            v_sum := v_sum + (v_cell ->> 'weekday_quota')::numeric;
+          ELSIF (v_cell -> 'quota') IS NOT NULL AND jsonb_typeof(v_cell -> 'quota') = 'number' THEN
+            v_sum := v_sum + (v_cell ->> 'quota')::numeric;
+          END IF;
+        ELSIF (v_cell -> 'quota') IS NOT NULL AND jsonb_typeof(v_cell -> 'quota') = 'number' THEN
+          v_sum := v_sum + (v_cell ->> 'quota')::numeric;
+        END IF;
       END IF;
     END LOOP;
     IF v_sum > v_inv THEN
-      RETURN format('%s：各渠道配额之和 %s 间超过该房型房量 %s 间', v_rt_name, v_sum, v_inv);
+      RETURN format('%s：各渠道工作日配额之和 %s 间超过该房型房量 %s 间', v_rt_name, v_sum, v_inv);
+    END IF;
+
+    v_sum := 0;
+    FOR v_i IN 1 .. coalesce(array_length(v_channels, 1), 0) LOOP
+      v_cell := p_week_data -> 'channels' -> v_channels[v_i] -> 'roomTypes' -> v_rt_key;
+      IF v_cell IS NOT NULL AND jsonb_typeof(v_cell) = 'object' THEN
+        IF (v_cell -> 'weekend_pricing_enabled') = 'true'::jsonb THEN
+          IF (v_cell -> 'weekend_quota') IS NOT NULL AND jsonb_typeof(v_cell -> 'weekend_quota') = 'number' THEN
+            v_sum := v_sum + (v_cell ->> 'weekend_quota')::numeric;
+          ELSIF (v_cell -> 'quota') IS NOT NULL AND jsonb_typeof(v_cell -> 'quota') = 'number' THEN
+            v_sum := v_sum + (v_cell ->> 'quota')::numeric;
+          END IF;
+        ELSIF (v_cell -> 'quota') IS NOT NULL AND jsonb_typeof(v_cell -> 'quota') = 'number' THEN
+          v_sum := v_sum + (v_cell ->> 'quota')::numeric;
+        END IF;
+      END IF;
+    END LOOP;
+    IF v_sum > v_inv THEN
+      RETURN format('%s：各渠道周末配额之和 %s 间超过该房型房量 %s 间', v_rt_name, v_sum, v_inv);
     END IF;
   END LOOP;
 
