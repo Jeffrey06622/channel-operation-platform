@@ -43,6 +43,8 @@ function fallbackRoomTypeDecision() {
     weekend_days: [] as number[],
     weekday_price: null,
     weekend_price: null,
+    weekday_quota: null,
+    weekend_quota: null,
   };
 }
 
@@ -695,6 +697,138 @@ export function roomTypeQuotaTotalsSplit(
     weTotal += weekend ?? 0;
   }
   return { weekday: wdTotal, weekend: weTotal };
+}
+
+// ─── 配额总览：配额总数 / 已用量 / 剩余量 / 配额状态 ─────────────────────────
+// 数据来源：完全由前端已保存的决策 payload 本地计算（weekDecision.channels[*]
+// .roomTypes[*].quota / weekday_quota / weekend_quota），不依赖任何新增后端字段，
+// 接口层无需改动。房量上限取 app_settings.base_params（缺省用内置常量）。
+export type QuotaStatus = 'blank' | 'empty' | 'partial' | 'full' | 'over';
+
+const QUOTA_STATUS_SEVERITY: Record<QuotaStatus, number> = {
+  blank: 0,
+  full: 1,
+  empty: 2,
+  partial: 3,
+  over: 4,
+};
+
+export interface QuotaPeriodUsage {
+  /** null = 该周期所有渠道都未填写（空白），与“填了 0”区分开 */
+  used: number | null;
+  remaining: number | null;
+  status: QuotaStatus;
+}
+
+export interface QuotaOverviewRow {
+  key: string;
+  name: string;
+  /** 配额总数（该房型房量 / 酒店总房量） */
+  cap: number;
+  weekday: QuotaPeriodUsage;
+  weekend: QuotaPeriodUsage;
+  /** 是否需要在界面上分别展示工作日与周末（存在显式拆分配额时为 true） */
+  split: boolean;
+  filledCells: number;
+  totalCells: number;
+  status: QuotaStatus;
+}
+
+export interface QuotaOverview {
+  rows: QuotaOverviewRow[];
+  total: QuotaOverviewRow;
+  hasWeekendSplit: boolean;
+  allBlank: boolean;
+}
+
+function periodUsage(used: number | null, cap: number): QuotaPeriodUsage {
+  if (used === null) return { used: null, remaining: null, status: 'blank' };
+  const remaining = cap - used;
+  const status: QuotaStatus =
+    used > cap ? 'over' : used === cap ? 'full' : used === 0 ? 'empty' : 'partial';
+  return { used, remaining, status };
+}
+
+function worstStatus(a: QuotaStatus, b: QuotaStatus): QuotaStatus {
+  return QUOTA_STATUS_SEVERITY[a] >= QUOTA_STATUS_SEVERITY[b] ? a : b;
+}
+
+export function buildQuotaOverview(
+  weekDecision: WeekDecision | null | undefined,
+  overrides?: BaseParams | null,
+): QuotaOverview {
+  const channels = resolveChannels(overrides);
+  const roomTypes = resolveRoomTypes(overrides);
+  const totalRooms = resolveTotalRooms(overrides);
+
+  const rows: QuotaOverviewRow[] = roomTypes.map((rt) => {
+    let wdSum = 0;
+    let weSum = 0;
+    let wdMissing = 0;
+    let weMissing = 0;
+    let rowHasSplit = false;
+    let filledCells = 0;
+
+    for (const c of channels) {
+      const cell = weekDecision?.channels?.[c.key]?.roomTypes?.[rt.key];
+      const enabled = cell?.weekend_pricing_enabled === true;
+      if (enabled && (cell?.weekday_quota != null || cell?.weekend_quota != null)) {
+        rowHasSplit = true;
+      }
+      const { weekday, weekend } = splitQuotas(cell);
+      if (weekday == null) wdMissing += 1;
+      else wdSum += weekday;
+      if (weekend == null) weMissing += 1;
+      else weSum += weekend;
+      if (weekday != null || weekend != null) filledCells += 1;
+    }
+
+    const wdAllMissing = wdMissing === channels.length;
+    const weAllMissing = weMissing === channels.length;
+    const weekday = periodUsage(wdAllMissing ? null : wdSum, rt.inventory);
+    const weekend = periodUsage(weAllMissing ? null : weSum, rt.inventory);
+
+    return {
+      key: rt.key,
+      name: rt.name,
+      cap: rt.inventory,
+      weekday,
+      weekend,
+      split: rowHasSplit,
+      filledCells,
+      totalCells: channels.length,
+      status: worstStatus(weekday.status, weekend.status),
+    };
+  });
+
+  const sumPeriod = (pick: (r: QuotaOverviewRow) => QuotaPeriodUsage, cap: number) => {
+    const values = rows.map((r) => pick(r).used);
+    if (values.every((v) => v === null)) {
+      return { used: null as number | null, remaining: null as number | null, status: 'blank' as QuotaStatus };
+    }
+    const used = values.reduce<number>((s, v) => s + (v ?? 0), 0);
+    return periodUsage(used, cap);
+  };
+
+  const total: QuotaOverviewRow = {
+    key: '__total__',
+    name: '酒店总配额',
+    cap: totalRooms,
+    weekday: sumPeriod((r) => r.weekday, totalRooms),
+    weekend: sumPeriod((r) => r.weekend, totalRooms),
+    split: rows.some((r) => r.split),
+    filledCells: rows.reduce((s, r) => s + r.filledCells, 0),
+    totalCells: rows.reduce((s, r) => s + r.totalCells, 0),
+    status: 'blank',
+  };
+  total.status = worstStatus(total.weekday.status, total.weekend.status);
+
+  return {
+    rows,
+    total,
+    hasWeekendSplit: rows.some((r) => r.split),
+    allBlank: total.filledCells === 0,
+  };
 }
 
 export function priceError(

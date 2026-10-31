@@ -76,7 +76,9 @@ import {
   quotaError,
   validateWeek,
   hasActiveSpecialFactors,
+  buildQuotaOverview,
 } from '../calc';
+import type { QuotaOverview, QuotaOverviewRow, QuotaPeriodUsage, QuotaStatus } from '../calc';
 import { cn, fmtMoney, fmtPct, fmtNum } from '../utils';
 import ResultsPanel from './ResultsPanel';
 import MarketReferencePage from './MarketReferencePage';
@@ -1677,6 +1679,7 @@ function WeekForm({
   const totalQuota = weekQuotaTotal(weekDecision, overrides);
   const totalOverflow = totalQuota > totalRooms;
   const disabled = isLocked || !isCurrentWeek;
+  const quotaOverview = buildQuotaOverview(weekDecision, overrides);
 
   return (
     <div className="space-y-5">
@@ -1749,6 +1752,17 @@ function WeekForm({
             />
           );
         })}
+      </div>
+
+      {/* 配额总览：配额总数 / 已用量 / 剩余量 / 配额状态 */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-3.5">
+        <div className="flex items-center justify-between mb-2.5">
+          <h3 className="text-sm font-semibold text-slate-700">本周配额总览</h3>
+          <span className="text-xs text-slate-400">
+            填写进度 {quotaOverview.total.filledCells}/{quotaOverview.total.totalCells} 个渠道
+          </span>
+        </div>
+        <QuotaOverviewPanel overview={quotaOverview} />
       </div>
 
       {/* Channel × RoomType pricing cards */}
@@ -2006,6 +2020,162 @@ function QuotaBar({
       {overflow && cap > 0 && (
         <div className="mt-1 text-xs text-red-600">超出 {used - cap} 间</div>
       )}
+    </div>
+  );
+}
+
+// ─── 配额总览：配额总数 / 已用量 / 剩余量 / 配额状态 ────────────────────────
+// 全部由本周已保存的决策本地计算，无新增后端字段。
+
+function quotaStatusMeta(status: QuotaStatus): {
+  label: string;
+  badge: string;
+  text: string;
+} {
+  switch (status) {
+    case 'blank':
+      return { label: '未填写', badge: 'bg-amber-100 text-amber-700', text: 'text-amber-600' };
+    case 'empty':
+      return { label: '未投放', badge: 'bg-slate-100 text-slate-600', text: 'text-slate-600' };
+    case 'partial':
+      return { label: '未排满', badge: 'bg-blue-100 text-blue-700', text: 'text-blue-700' };
+    case 'full':
+      return { label: '已排满', badge: 'bg-emerald-100 text-emerald-700', text: 'text-emerald-700' };
+    case 'over':
+      return { label: '超额', badge: 'bg-red-100 text-red-700', text: 'text-red-600' };
+    default:
+      return { label: '未知', badge: 'bg-slate-100 text-slate-600', text: 'text-slate-600' };
+  }
+}
+
+function PeriodFigures({
+  label,
+  usage,
+  cap,
+}: {
+  label: string;
+  usage: QuotaPeriodUsage;
+  cap: number;
+}) {
+  const meta = quotaStatusMeta(usage.status);
+  if (usage.status === 'blank') {
+    return (
+      <div className="flex items-center gap-2 text-xs">
+        <span className="w-12 shrink-0 text-slate-400">{label}</span>
+        <span className="text-amber-600">配额未填写</span>
+      </div>
+    );
+  }
+  const used = usage.used ?? 0;
+  const remaining = usage.remaining ?? 0;
+  return (
+    <div className="flex items-center flex-wrap gap-x-4 gap-y-1 text-xs">
+      <span className="w-12 shrink-0 text-slate-400">{label}</span>
+      <span className="text-slate-500">
+        已用 <strong className={cn('text-sm', meta.text)}>{used}</strong> 间
+      </span>
+      <span className="text-slate-500">
+        剩余{' '}
+        <strong className={cn('text-sm', remaining < 0 ? 'text-red-600' : 'text-slate-800')}>
+          {remaining < 0 ? `超额 ${Math.abs(remaining)}` : remaining}
+        </strong>{' '}
+        间
+      </span>
+      <span className="text-slate-400">上限 {cap} 间</span>
+      {used === 0 && <span className="text-slate-400">（本周该周期未投放房量）</span>}
+    </div>
+  );
+}
+
+function QuotaOverviewRowCard({ row }: { row: QuotaOverviewRow }) {
+  const meta = quotaStatusMeta(row.status);
+  const pct = row.cap > 0 ? Math.min(100, ((row.weekday.used ?? row.weekend.used ?? 0) / row.cap) * 100) : 0;
+  return (
+    <div
+      className={cn(
+        'rounded-xl border p-3 bg-white shadow-sm',
+        row.status === 'over' ? 'border-red-200' : 'border-slate-200',
+      )}
+    >
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-sm font-semibold text-slate-800 truncate">{row.name}</span>
+          <span className="text-xs text-slate-400">
+            {row.cap} 间
+          </span>
+        </div>
+        <span className={cn('text-xs px-2 py-0.5 rounded-full font-medium shrink-0', meta.badge)}>
+          {meta.label}
+        </span>
+      </div>
+
+      {row.filledCells === 0 ? (
+        <div className="text-xs text-amber-600 bg-amber-50 rounded-lg px-2.5 py-1.5">
+          配额未填写（{row.totalCells} 个渠道待填，上限 {row.cap} 间）
+        </div>
+      ) : row.split ? (
+        <div className="space-y-1.5">
+          <PeriodFigures label="工作日" usage={row.weekday} cap={row.cap} />
+          <PeriodFigures label="周末" usage={row.weekend} cap={row.cap} />
+        </div>
+      ) : (
+        <PeriodFigures label="全周" usage={row.weekday} cap={row.cap} />
+      )}
+
+      <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden mt-2">
+        <div
+          className={cn(
+            'h-full rounded-full transition-all',
+            row.status === 'over'
+              ? 'bg-red-500'
+              : row.status === 'full'
+                ? 'bg-emerald-500'
+                : 'bg-blue-400',
+          )}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      {row.split && (
+        <div className="mt-1 text-xs text-slate-400">
+          工作日与周末分别占用同一批房量，二者各自不得超过 {row.cap} 间
+        </div>
+      )}
+    </div>
+  );
+}
+
+function QuotaOverviewPanel({ overview }: { overview: QuotaOverview }) {
+  if (overview.allBlank) {
+    return (
+      <div className="bg-amber-50 border border-amber-200 rounded-xl p-3.5">
+        <div className="text-sm font-semibold text-amber-800 mb-1">本周配额尚未填写</div>
+        <div className="text-xs text-amber-700">
+          请在下方各渠道卡片中，为每个「渠道 × 房型」填写房间数量（配额）。填写后此处会实时显示
+          <strong> 配额总数 / 已用量 / 剩余量 / 配额状态</strong>；未填写完整将无法提交本周决策。
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2.5">
+      {overview.hasWeekendSplit && (
+        <div className="text-xs text-slate-500">
+          本周已启用「区分周末价」，工作日与周末配额分别核算（各受该房型房量约束）。
+        </div>
+      )}
+      <div
+        className={cn(
+          'rounded-xl border p-3 shadow-sm',
+          overview.total.status === 'over' ? 'bg-red-50 border-red-200' : 'bg-slate-50 border-slate-200',
+        )}
+      >
+        <QuotaOverviewRowCard row={overview.total} />
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+        {overview.rows.map((r) => (
+          <QuotaOverviewRowCard key={r.key} row={r} />
+        ))}
+      </div>
     </div>
   );
 }

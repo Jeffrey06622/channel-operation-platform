@@ -16,7 +16,7 @@
  * Migration 20261019100000 enforces the same rule server-side inside
  * `submit_week`, before `save_week`, so a rejection persists nothing.
  */
-import { quotaSubmissionError, validateWeek } from '../src/calc';
+import { quotaSubmissionError, validateWeek, buildQuotaOverview } from '../src/calc';
 import { CHANNELS, ROOM_TYPES, emptyDecisionPayload } from '../src/domain';
 import type { DecisionPayload, RoomTypeKey } from '../src/types';
 
@@ -239,6 +239,46 @@ assert(
   '各渠道周末配额之和 54 > 50 -> 按房型房量拦截',
   weAggregate.join(' | '),
 );
+
+// ─── 5. 配额总览：配额总数 / 已用量 / 剩余量 / 配额状态 ─────────────────────
+section('5. buildQuotaOverview（配额总览，本地计算、无新增后端字段）');
+
+// 5.1 整周未填写 -> allBlank，used 为 null（与填 0 区分）
+const blankOv = buildQuotaOverview(emptyDecisionPayload(CHANNELS, ROOM_TYPES).weeks.wk5, null);
+assert(blankOv.allBlank === true, '整周空白 -> allBlank = true（界面显示空状态提示）');
+assert(blankOv.total.weekday.used === null, '整周空白 -> 已用量为 null 而非 0');
+assert(blankOv.total.status === 'blank', '整周空白 -> 状态 = blank/未填写', blankOv.total.status);
+
+// 5.2 正常分配：高级房 8×6=48（房量 50）-> 未排满，剩余 2
+const baseOv = buildQuotaOverview(buildWeek(BASELINE).weeks.wk5, null);
+const superiorRow = baseOv.rows.find((r) => r.key === 'superior')!;
+assert(superiorRow.cap === 50, '高级房 配额总数 = 房量 50 间', String(superiorRow.cap));
+assert(superiorRow.weekday.used === 48, '高级房 已用量 = 8×6 = 48 间', String(superiorRow.weekday.used));
+assert(superiorRow.weekday.remaining === 2, '高级房 剩余量 = 50-48 = 2 间', String(superiorRow.weekday.remaining));
+assert(superiorRow.status === 'partial', '高级房 状态 = 未排满', superiorRow.status);
+assert(baseOv.total.weekday.used === 90, '酒店合计 已用量 = 48+36+6 = 90 间', String(baseOv.total.weekday.used));
+assert(baseOv.total.weekday.remaining === 10, '酒店合计 剩余量 = 100-90 = 10 间');
+assert(baseOv.total.status === 'partial', '酒店合计 状态 = 未排满');
+
+// 5.3 超额：高级房每渠道 10 间 ×6 = 60 > 50
+const overOv = buildQuotaOverview(buildWeek({ superior: 10, deluxe: 6, suite: 1 }).weeks.wk5, null);
+const overRow = overOv.rows.find((r) => r.key === 'superior')!;
+assert(overRow.status === 'over', '超额 -> 状态 = over/超额', overRow.status);
+assert(overRow.weekday.remaining === -10, '超额 -> 剩余量为负（-10），界面显示“超额 10”', String(overRow.weekday.remaining));
+
+// 5.4 配额为 0 -> 状态 empty/未投放，剩余 = 房量
+const zeroOv = buildQuotaOverview(buildWeek(allCells(0)).weeks.wk5, null);
+assert(zeroOv.total.status === 'empty', '配额全为 0 -> 状态 = empty/未投放', zeroOv.total.status);
+assert(zeroOv.total.weekday.used === 0, '配额全为 0 -> 已用量 0（区别于未填写）', String(zeroOv.total.weekday.used));
+assert(zeroOv.total.weekday.remaining === 100, '配额全为 0 -> 剩余 = 总房量 100 间');
+
+// 5.5 排满：套房 1×... 构造 50/40/10 恰好排满需要非整分配，改用高级房每渠道 8 且房量被临时参数改成 48
+const capOverrideOv = buildQuotaOverview(buildWeek({ superior: 8, deluxe: 0, suite: 0 }).weeks.wk5, {
+  roomTypes: { superior: { key: 'superior', name: '高级房', inventory: 48, priceMultiplier: 1 } },
+} as never);
+const fullRow = capOverrideOv.rows.find((r) => r.key === 'superior')!;
+assert(fullRow.weekday.used === 48 && fullRow.cap === 48, '恰好排满 -> 已用 = 房量', `${fullRow.weekday.used}/${fullRow.cap}`);
+assert(fullRow.status === 'full', '恰好排满 -> 状态 = full/已排满', fullRow.status);
 
 console.log(`\n结果：${checks - failures}/${checks} 通过，${failures} 失败`);
 if (failures > 0) process.exit(1);
