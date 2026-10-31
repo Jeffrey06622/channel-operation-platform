@@ -8,7 +8,8 @@
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.app.json"
+    "typecheck": "tsc --noEmit -p tsconfig.app.json",
+    "verify:quota": "esbuild scripts/verify-quota-validation.ts --bundle --platform=node --format=cjs --outfile=node_modules/.cache/quota-check.cjs --log-level=error && node node_modules/.cache/quota-check.cjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.4",

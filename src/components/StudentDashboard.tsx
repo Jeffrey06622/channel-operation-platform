@@ -114,6 +114,15 @@ function clonePayload<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+/**
+ * Pull the human-readable part out of a server-raised QUOTA_INVALID message
+ * ("QUOTA_INVALID: 携程-高级房：配额未填写" -> "携程-高级房：配额未填写").
+ */
+function extractQuotaDetail(message: string): string {
+  const detail = message.split('QUOTA_INVALID:')[1]?.trim();
+  return detail && detail.length > 0 ? detail : '每个渠道 × 房型都要填写 1～房型房量之间的整数配额';
+}
+
 export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Props) {
   const [payload, setPayload] = useState<DecisionPayload>(() => emptyDecisionPayload());
   const [hotelName, setHotelName] = useState(group.hotel_name);
@@ -705,6 +714,12 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
           setError('数据已在别处更新，请刷新页面获取最新数据后再提交');
         } else if (msg.includes('REJECT_EMPTY_OVERWRITE')) {
           setError('本周已有数据，无法用空数据覆盖，请刷新页面后重试');
+        } else if (msg.includes('WEEK_INCOMPLETE')) {
+          setError('本周决策未填写完整：每个渠道 × 房型都要填写价格与配额后才能提交');
+        } else if (msg.includes('QUOTA_INVALID')) {
+          // Server-side quota gate (migration 20261019100000). Show the server's
+          // own detail so the message always names the failing channel/room type.
+          setError(`房间数量（配额）不合规，无法提交：${extractQuotaDetail(msg)}`);
         } else if (isNetworkError(rpcErr)) {
           setError('网络不佳，请检查网络后重试');
         } else {
@@ -737,6 +752,10 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
         setError('数据已在别处更新，请刷新页面获取最新数据后再提交');
       } else if (err instanceof Error && err.message.includes('SUBMITTED_WEEK_LOCKED')) {
         setError('本周已提交，无法重复提交');
+      } else if (err instanceof Error && err.message.includes('WEEK_INCOMPLETE')) {
+        setError('本周决策未填写完整：每个渠道 × 房型都要填写价格与配额后才能提交');
+      } else if (err instanceof Error && err.message.includes('QUOTA_INVALID')) {
+        setError(`房间数量（配额）不合规，无法提交：${extractQuotaDetail(err.message)}`);
       } else {
         setError(err instanceof Error ? err.message : '提交失败');
       }
@@ -1157,6 +1176,7 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
         )}
 
         {activeWeek !== 'summary' && activeWeek !== 'history' && (
+          <>
           <div className="mt-6 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
             <div className="text-sm text-slate-500">
               {isWeekLocked(activeWeek) ? (
@@ -1177,7 +1197,9 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
               ) : weekValidationErrors.length > 0 ? (
                 <span className="inline-flex items-center gap-1.5 text-red-600">
                   <AlertCircle className="w-4 h-4" />
-                  还剩 {weekValidationErrors.length} 项校验未通过
+                  {weekValidationErrors.length === 1
+                    ? weekValidationErrors[0]
+                    : `本周还有 ${weekValidationErrors.length} 项未填写/未通过，明细见下方`}
                 </span>
               ) : isDeadlinePassed ? (
                 <span className="inline-flex items-center gap-1.5 text-orange-600">
@@ -1232,6 +1254,24 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
               )}
             </div>
           </div>
+          {activeWeekEditable && weekValidationErrors.length > 0 && (
+            <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-700">
+              <div className="font-medium mb-1.5">
+                提交前请先完成以下 {weekValidationErrors.length} 项（每个渠道 × 房型的价格与配额都必须填写）：
+              </div>
+              <ul className="list-disc pl-4 space-y-0.5 max-h-36 overflow-y-auto">
+                {weekValidationErrors.slice(0, 8).map((msg, i) => (
+                  <li key={i}>{msg}</li>
+                ))}
+              </ul>
+              {weekValidationErrors.length > 8 && (
+                <div className="mt-1 text-red-500">
+                  …等共 {weekValidationErrors.length} 项，填写完整后即可提交
+                </div>
+              )}
+            </div>
+          )}
+          </>
         )}
 
         {activeWeek === 'summary' && (
@@ -1726,7 +1766,10 @@ function WeekForm({
                   const rtDec = weekDecision.channels[ch.key].roomTypes[rt.key];
                   const min = priceMin(ch.key, rt.key, overrides);
                   const max = priceMax(ch.key, rt.key, overrides);
-                  const qErr = quotaError(rtDec.quota);
+                  // Inline hint only: shows negative / non-integer / over-inventory
+                  // input. The "must be filled, cannot be 0" rule is applied at
+                  // submit time (validateWeek) and again on the server.
+                  const qErr = quotaError(rtDec.quota, rt.inventory);
                   const weekendEnabled = rtDec.weekend_pricing_enabled === true;
                   const weekendDays = Array.isArray(rtDec.weekend_days) ? rtDec.weekend_days : [];
                   return (
@@ -1770,20 +1813,32 @@ function WeekForm({
                       </div>
 
                       {weekendEnabled ? (
-                        <WeekendPricingSection
-                          weekKey={weekKey}
-                          channelKey={ch.key}
-                          roomTypeKey={rt.key}
-                          weekendDays={weekendDays}
-                          weekdayPrice={rtDec.weekday_price ?? null}
-                          weekendPrice={rtDec.weekend_price ?? null}
-                          min={min}
-                          max={max}
-                          disabled={disabled}
-                          onToggleDay={onToggleWeekendDay}
-                          onUpdatePrice={onUpdateWeekendPrice}
-                          specialFactorsActive={hasActiveSpecialFactors(weekDecision.specialFactors)}
-                        />
+                        <>
+                          <WeekendPricingSection
+                            weekKey={weekKey}
+                            channelKey={ch.key}
+                            roomTypeKey={rt.key}
+                            weekendDays={weekendDays}
+                            weekdayPrice={rtDec.weekday_price ?? null}
+                            weekendPrice={rtDec.weekend_price ?? null}
+                            min={min}
+                            max={max}
+                            disabled={disabled}
+                            onToggleDay={onToggleWeekendDay}
+                            onUpdatePrice={onUpdateWeekendPrice}
+                            specialFactorsActive={hasActiveSpecialFactors(weekDecision.specialFactors)}
+                          />
+                          <div className="flex items-center gap-2 pt-1">
+                            <span className="text-xs text-slate-500 w-16 shrink-0">配额</span>
+                            <QuotaInput
+                              value={rtDec.quota}
+                              onChange={(v) => onChannelUpdate(weekKey, ch.key, rt.key, 'quota', v)}
+                              disabled={disabled}
+                              error={qErr}
+                            />
+                            <span className="text-xs text-slate-400">间 · 该渠道本房型每周可售量</span>
+                          </div>
+                        </>
                       ) : (
                         <div className="flex items-center gap-4 flex-wrap">
                           <PriceInput

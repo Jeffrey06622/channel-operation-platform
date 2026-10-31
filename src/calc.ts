@@ -633,11 +633,74 @@ export function priceError(
   return null;
 }
 
-export function quotaError(quota: number | null): string | null {
+export function quotaError(quota: number | null, inventory?: number): string | null {
   if (quota === null || quota === undefined || Number.isNaN(quota)) return null;
   if (quota < 0) return '禁止输入负数';
   if (!Number.isInteger(quota)) return '配额需为整数';
+  if (inventory != null && quota > inventory) {
+    return `不得超过该房型房量 ${inventory} 间`;
+  }
   return null;
+}
+
+/**
+ * Submit-time quota rule (第 6 批修复).
+ *
+ * Historically `validateWeek` only required a quota to be *present* for the
+ * field-level rules and never required it at all before batch 5 — a group could
+ * submit a week whose prices were complete while every quota was empty, 0, or
+ * out of range. Production evidence: 酒管25091 第6组 wk5 提交了 18 个价格，
+ * 18 个配额全为 null，页面显示"总房量配额 0/100"。
+ *
+ * A quota is now only accepted when it is:
+ *   1. present (not null / undefined / NaN),
+ *   2. an integer >= 1 — 0 is rejected so "未投放" cannot masquerade as a
+ *      filled decision,
+ *   3. <= the room type's inventory.
+ *
+ * The same rule is enforced server-side by
+ * `supabase/migrations/20261019100000_require_valid_quota_on_submit.sql`
+ * (SQLSTATE 40013, raised before any write), so the button state in the UI is
+ * never the only guard.
+ */
+export function quotaSubmissionError(quota: number | null | undefined, inventory: number): string | null {
+  if (quota === null || quota === undefined || Number.isNaN(quota)) return '配额未填写';
+  if (!Number.isFinite(quota) || !Number.isInteger(quota)) return '配额需为整数';
+  if (quota <= 0) return '配额不能为 0 或负数';
+  if (quota > inventory) return `不得超过该房型房量 ${inventory} 间`;
+  return null;
+}
+
+/**
+ * A week is "blank" when no channel × room type cell carries either a price or
+ * a quota. The weekly exercise IS the pricing/quota decision, so a blank week
+ * means the student did no work that week.
+ *
+ * Drafts may still be blank (auto-save keeps partial work); only submission is
+ * gated on completeness.
+ */
+export function isWeekBlank(
+  weekDecision: WeekDecision | null | undefined,
+  overrides?: BaseParams | null,
+): boolean {
+  if (!weekDecision) return true;
+  const channels = resolveChannels(overrides);
+  const roomTypes = resolveRoomTypes(overrides);
+  for (const ch of channels) {
+    const cd = weekDecision.channels?.[ch.key];
+    if (!cd) continue;
+    for (const rt of roomTypes) {
+      const rtDec = cd.roomTypes?.[rt.key];
+      if (!rtDec) continue;
+      const quotaFilled = rtDec.quota !== null && rtDec.quota !== undefined;
+      const priceFilled =
+        rtDec.weekend_pricing_enabled === true
+          ? rtDec.weekday_price != null || rtDec.weekend_price != null
+          : rtDec.price != null;
+      if (quotaFilled || priceFilled) return false;
+    }
+  }
+  return true;
 }
 
 export function validateWeek(payload: DecisionPayload, weekKey: string, overrides?: BaseParams | null): string[] {
@@ -665,12 +728,21 @@ export function validateWeek(payload: DecisionPayload, weekKey: string, override
       );
     }
   }
+  // Submission requires a fully filled week: every channel × room type must
+  // carry both a price and a quota. A blank week collapses to a single clear
+  // message instead of dozens of duplicated field errors.
+  if (isWeekBlank(wd, overrides)) {
+    return ['本周尚未填写任何内容：请完成每个渠道 × 房型的价格与配额后再提交'];
+  }
+
   for (const ch of channels) {
     const cd = wd.channels?.[ch.key];
-    if (!cd) continue;
     for (const rt of roomTypes) {
-      const rtDec = cd.roomTypes?.[rt.key];
-      if (!rtDec) continue;
+      const rtDec = cd?.roomTypes?.[rt.key];
+      if (!rtDec) {
+        errors.push(`${ch.name}-${rt.name}：尚未填写价格与配额`);
+        continue;
+      }
       if (rtDec.weekend_pricing_enabled === true) {
         const weekendDays = rtDec.weekend_days ?? [];
         if (weekendDays.length === 0) {
@@ -678,17 +750,28 @@ export function validateWeek(payload: DecisionPayload, weekKey: string, override
         } else if (weekendDays.length === 7) {
           errors.push(`${ch.name}-${rt.name}：不能将全部7天都设为周末价`);
         }
-        const wdpErr = priceError(ch.key, rt.key, rtDec.weekday_price ?? null, overrides);
-        if (wdpErr) errors.push(`${ch.name}-${rt.name}工作日价：${wdpErr}`);
-        if (rtDec.weekday_price == null) errors.push(`${ch.name}-${rt.name}：工作日价不能为空`);
-        const wepErr = priceError(ch.key, rt.key, rtDec.weekend_price ?? null, overrides);
-        if (wepErr) errors.push(`${ch.name}-${rt.name}周末价：${wepErr}`);
-        if (rtDec.weekend_price == null) errors.push(`${ch.name}-${rt.name}：周末价不能为空`);
+        if (rtDec.weekday_price == null) {
+          errors.push(`${ch.name}-${rt.name}：工作日价未填写`);
+        } else {
+          const wdpErr = priceError(ch.key, rt.key, rtDec.weekday_price, overrides);
+          if (wdpErr) errors.push(`${ch.name}-${rt.name}工作日价：${wdpErr}`);
+        }
+        if (rtDec.weekend_price == null) {
+          errors.push(`${ch.name}-${rt.name}：周末价未填写`);
+        } else {
+          const wepErr = priceError(ch.key, rt.key, rtDec.weekend_price, overrides);
+          if (wepErr) errors.push(`${ch.name}-${rt.name}周末价：${wepErr}`);
+        }
+      } else if (rtDec.price == null) {
+        errors.push(`${ch.name}-${rt.name}：价格未填写`);
       } else {
         const pErr = priceError(ch.key, rt.key, rtDec.price, overrides);
         if (pErr) errors.push(`${ch.name}-${rt.name}：${pErr}`);
       }
-      const qErr = quotaError(rtDec.quota);
+      // Quota is a required decision, validated at the same stage as the price:
+      // missing, 0/negative, non-integer and out-of-range values all block the
+      // submission. Mirrors the server-side rule in migration 20261019100000.
+      const qErr = quotaSubmissionError(rtDec.quota, rt.inventory);
       if (qErr) errors.push(`${ch.name}-${rt.name}：${qErr}`);
     }
   }
@@ -738,7 +821,7 @@ export function validateAll(payload: DecisionPayload, overrides?: BaseParams | n
           const pErr = priceError(ch.key, rt.key, rtDec.price, overrides);
           if (pErr) errors.push(`第${week.index}周 · ${ch.name}-${rt.name}：${pErr}`);
         }
-        const qErr = quotaError(rtDec.quota);
+        const qErr = quotaSubmissionError(rtDec.quota, rt.inventory);
         if (qErr) errors.push(`第${week.index}周 · ${ch.name}-${rt.name}：${qErr}`);
       }
     }
