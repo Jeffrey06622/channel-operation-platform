@@ -169,7 +169,7 @@ export default function SpecialDemandPanel({ groups, decisionMap, baseParams, cu
         setLoadState('error');
         return;
       }
-      const rows = (res.data as SpecialDemandFactor[] | null) ?? [];
+      const rows = Array.isArray(res.data) ? (res.data as SpecialDemandFactor[]) : [];
       registerActiveFactors(rows);
       setFactors(rows);
       setLoadState('ready');

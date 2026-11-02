@@ -62,14 +62,19 @@ function namesOf(keys: string[], list: { key: string; name: string }[]): string 
   return names.length > 0 ? names.join('、') : '未选择';
 }
 
+function scopeKeysOf(factor: SpecialDemandFactor): string[] {
+  return Array.isArray(factor.scope_keys) ? factor.scope_keys : [];
+}
+
 export function describeScope(factor: SpecialDemandFactor, baseParams?: BaseParams | null): string {
+  const scopeKeys = scopeKeysOf(factor);
   const rooms =
     factor.scope_type === 'room_type'
-      ? namesOf(factor.scope_keys, resolveRoomTypes(baseParams))
+      ? namesOf(scopeKeys, resolveRoomTypes(baseParams))
       : '全部房型';
   const channels =
     factor.scope_type === 'channel'
-      ? namesOf(factor.scope_keys, resolveChannels(baseParams))
+      ? namesOf(scopeKeys, resolveChannels(baseParams))
       : '全部渠道';
   return `${rooms}／${channels}`;
 }
@@ -136,10 +141,10 @@ export function evaluateGroupResponse(
 
   const allChannelKeys = resolveChannels(baseParams).map((c) => c.key);
   const allRooms = resolveRoomTypes(baseParams);
-  const affectedChannels = factor.scope_type === 'channel' ? factor.scope_keys : allChannelKeys;
+  const affectedChannels = factor.scope_type === 'channel' ? scopeKeysOf(factor) : allChannelKeys;
   const affectedRooms =
     factor.scope_type === 'room_type'
-      ? allRooms.filter((r) => factor.scope_keys.includes(r.key))
+      ? allRooms.filter((r) => scopeKeysOf(factor).includes(r.key))
       : allRooms;
 
   let affectedQuota = 0;
@@ -250,10 +255,12 @@ function toFactorMeta(f: SpecialDemandFactor): SpecialFactorMeta {
 }
 
 export function registerActiveFactors(rows: SpecialDemandFactor[]): void {
+  if (!Array.isArray(rows)) return;
   registerSpecialFactors(rows.filter((f) => f.is_active).map(toFactorMeta));
 }
 
 export function studentSelectableFactors(rows: SpecialDemandFactor[], week: WeekMeta): SpecialFactorMeta[] {
+  if (!Array.isArray(rows)) return [];
   return rows.filter((f) => f.student_selectable && isFactorEffective(f, week)).map(toFactorMeta);
 }
 
@@ -264,10 +271,13 @@ export function buildResponseMatrix(
   week: WeekMeta,
   baseParams: BaseParams | null,
 ): FactorResponseMatrix[] {
-  return factors.map((factor) => {
-    const evaluations = groups.map((g) => ({
+  const factorList = Array.isArray(factors) ? factors : [];
+  const groupList = Array.isArray(groups) ? groups : [];
+  const decisions = decisionMap instanceof Map ? decisionMap : new Map<string, DecisionRow>();
+  return factorList.map((factor) => {
+    const evaluations = groupList.map((g) => ({
       group: g,
-      result: evaluateGroupResponse(factor, week, decisionMap.get(g.id)?.payload, baseParams),
+      result: evaluateGroupResponse(factor, week, decisions.get(g.id)?.payload, baseParams),
     }));
     const values = evaluations
       .map((e) => e.result.metric_value)
@@ -291,7 +301,7 @@ export function buildResponseMatrix(
       trigger_text: describeTrigger(factor),
       rows,
       responded_count: rows.filter((r) => r.status === 'responded').length,
-      total_groups: groups.length,
+      total_groups: groupList.length,
       median: percentile(values, 0.5),
     };
   });

@@ -116,6 +116,10 @@ type WeekTab = string | 'summary' | 'history';
 type ViewMode = 'decision' | 'market';
 
 // JSON-based deep clone — avoids structuredClone dependency on legacy/mobile browsers.
+function factorKeysOf(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((k): k is string => typeof k === 'string') : [];
+}
+
 function clonePayload<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -330,7 +334,8 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
 
     setOpenWeekKeys(new Set((openRes.data as OpenWeekRow[] | null)?.map((r) => r.week_key) ?? []));
 
-    const factorRows = factorRes.error ? [] : ((factorRes.data as SpecialDemandFactor[] | null) ?? []);
+    const factorRows: SpecialDemandFactor[] =
+      !factorRes.error && Array.isArray(factorRes.data) ? (factorRes.data as SpecialDemandFactor[]) : [];
     registerActiveFactors(factorRows);
     setSpecialFactors(factorRows);
 
@@ -388,7 +393,7 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
               merged.channels[savedChKey] = mergedCh;
             }
           }
-          merged.specialFactors = savedWeek.specialFactors ?? [];
+          merged.specialFactors = factorKeysOf(savedWeek.specialFactors);
           base.weeks[savedWeekKey] = merged;
         }
       }
@@ -528,7 +533,7 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
         const next = clonePayload(prev) as DecisionPayload;
         const wd = next.weeks[weekKey];
         if (!wd) return prev;
-        const factors = wd.specialFactors ?? [];
+        const factors = factorKeysOf(wd.specialFactors);
         if (factors.includes(factorKey)) {
           wd.specialFactors = factors.filter((f) => f !== factorKey);
         } else {
@@ -837,7 +842,7 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
   const activeWeekMeta = WEEKS.find((w) => w.key === activeWeek);
   const availableFactors: SpecialFactorMeta[] = [
     ...SPECIAL_FACTORS,
-    ...studentSelectableFactors(specialFactors, activeWeekMeta ?? WEEKS[0]),
+    ...studentSelectableFactors(Array.isArray(specialFactors) ? specialFactors : [], activeWeekMeta ?? WEEKS[0]),
   ];
 
   async function handleChangePassword() {
@@ -1866,7 +1871,7 @@ function WeekForm({
                             disabled={disabled}
                             onToggleDay={onToggleWeekendDay}
                             onUpdatePrice={onUpdateWeekendPrice}
-                            specialFactorsActive={hasActiveSpecialFactors(weekDecision.specialFactors)}
+                            specialFactorsActive={hasActiveSpecialFactors(factorKeysOf(weekDecision.specialFactors))}
                           />
                           <div className="flex items-center gap-4 flex-wrap pt-1">
                             <div className="flex items-center gap-2">
@@ -1932,7 +1937,7 @@ function WeekForm({
         )}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {availableFactors.map((f) => {
-            const checked = (weekDecision.specialFactors ?? []).includes(f.key);
+            const checked = factorKeysOf(weekDecision.specialFactors).includes(f.key);
             const Icon = FACTOR_ICONS[f.key] || Info;
             return (
               <button
@@ -2744,14 +2749,14 @@ function HistoryReview({ payload, cycleResult, submittedWeeks, baseParams }: His
       </div>
 
       {/* Special factors applied */}
-      {(weekDecision.specialFactors ?? []).length > 0 && (
+      {factorKeysOf(weekDecision.specialFactors).length > 0 && (
         <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4">
           <div className="flex items-center gap-2 mb-2">
             <Info className="w-4 h-4 text-indigo-600" />
             <span className="text-sm font-semibold text-indigo-800">本周特殊因素</span>
           </div>
           <div className="flex flex-wrap gap-2">
-            {(weekDecision.specialFactors ?? []).map((fk) => {
+            {factorKeysOf(weekDecision.specialFactors).map((fk) => {
               const meta = getRegisteredSpecialFactor(fk);
               if (!meta) return null;
               const Icon = FACTOR_ICONS[fk] || Info;
