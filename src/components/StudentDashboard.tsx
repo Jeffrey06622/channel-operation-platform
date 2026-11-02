@@ -279,17 +279,22 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
     return validateWeek(payload, activeWeek, baseParams);
   }, [payload, activeWeek]);
 
+  const currentWeekMeta = WEEKS.find((w) => w.key === currentWeekKey);
+  useEffect(() => {
+    if (!currentWeekMeta && currentWeekKey) console.warn('[WK] 当前周无法解析', currentWeekKey);
+  }, [currentWeekKey, currentWeekMeta]);
+  useEffect(() => {
+    if (currentWeekKey) setActiveWeek(currentWeekKey as WeekTab);
+  }, [currentWeekKey]);
+
   const loadData = useCallback(async () => {
     setLoading(true);
 
     const [settingsRes, decRes, subRes, openRes, factorRes] = await Promise.all([
       supabaseFetch(() =>
-        supabase.from('special_demand_factors').select('*').eq('is_active', true).order('sort_order'),
-      ),
-      supabaseFetch(() =>
         supabase
           .from('app_settings')
-          .select('current_week_key, submission_deadline, late_submit_deadline, base_params, benchmark_fiscal_year, benchmark_hotel_class, channel_sim')
+          .select('id, current_week_key, updated_at, submission_deadline, late_submit_deadline, base_params, benchmark_fiscal_year, benchmark_hotel_class, channel_sim')
           .maybeSingle(),
       ),
       supabaseFetch(() =>
@@ -309,6 +314,9 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
       ),
       supabaseFetch(() =>
         supabase.from('open_weeks').select('week_key'),
+      ),
+      supabaseFetch(() =>
+        supabase.from('special_demand_factors').select('*').eq('is_active', true).order('sort_order'),
       ),
     ]);
     // Every failed read aborts the load. Supabase query builders resolve with
