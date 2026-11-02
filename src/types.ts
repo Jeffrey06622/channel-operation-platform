@@ -258,3 +258,51 @@ export interface DecisionRow {
   created_at: string;
   updated_at: string;
 }
+
+export type SpecialDemandCategory = 'event' | 'holiday' | 'weather' | 'competition' | 'policy' | 'other';
+export type SpecialDemandScope = 'all' | 'room_type' | 'channel';
+export type SpecialDemandExpected = 'raise_price' | 'expand_quota' | 'shift_mix' | 'hold_price' | 'no_change';
+
+export interface SpecialDemandFactor {
+  id: string;
+  week_key: string;
+  name: string;
+  category: SpecialDemandCategory;
+  direction: 'increase' | 'decrease' | 'neutral';
+  magnitude: number;
+  demand_multiplier: number;
+  description: string;
+  scope_type: SpecialDemandScope;
+  scope_keys: string[];
+  expected_response: SpecialDemandExpected;
+  threshold: number;
+  effective_from: string | null;
+  effective_to: string | null;
+  is_active: boolean;
+  student_selectable: boolean;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ResponseStatus = 'responded' | 'not_responded' | 'no_data';
+export type CompareStatus = 'leading' | 'on_par' | 'lagging' | 'no_data';
+
+export interface GroupResponseRow {
+  group_id: string;
+  group_name: string;
+  class_label: string;
+  status: ResponseStatus;
+  metric_value: number | null;
+  compare: CompareStatus;
+  detail: string;
+}
+
+export interface FactorResponseMatrix {
+  factor: SpecialDemandFactor;
+  trigger_text: string;
+  rows: GroupResponseRow[];
+  responded_count: number;
+  total_groups: number;
+  median: number | null;
+}

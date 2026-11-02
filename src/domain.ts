@@ -468,3 +468,20 @@ export function resolveChannels(overrides?: BaseParams | null): ChannelMeta[] {
   }));
   return [...base, ...customMetas];
 }
+
+export function registerSpecialFactors(
+  list: Array<{ key: string; name: string; demandMultiplier: number; description?: string }>,
+): void {
+  for (const f of list) {
+    SPECIAL_FACTOR_MAP[f.key] = {
+      key: f.key,
+      name: f.name,
+      demandMultiplier: f.demandMultiplier,
+      description: f.description ?? '',
+    };
+  }
+}
+
+export function getRegisteredSpecialFactor(key: string): SpecialFactorMeta | undefined {
+  return SPECIAL_FACTOR_MAP[key];
+}

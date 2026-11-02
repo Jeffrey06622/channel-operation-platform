@@ -38,14 +38,16 @@ import {
 import { supabase } from '../supabaseClient';
 import { supabaseFetch, isNetworkError, isRpcMissing, isMissingPasswordColumn, describeError } from '../supabaseRequest';
 import { hashPassword, verifyTeacherPassword, getTeacherSecret, setTeacherSecret, clearTeacherSecret } from '../auth';
-import type { AppSettingsRow, BaseParams, ChannelKey, ChannelSimConfig, DecisionPayload, DecisionRow, GroupRow, OpenWeekRow, RoomTypeKey, WeekSubmissionRow } from '../types';
+import type { AppSettingsRow, BaseParams, ChannelKey, ChannelSimConfig, DecisionPayload, DecisionRow, GroupRow, OpenWeekRow, RoomTypeKey, SpecialDemandFactor, WeekSubmissionRow } from '../types';
 import { WEEKS, resolveRoomTypes } from '../domain';
+import { registerActiveFactors } from '../specialDemand';
 import { computeCycle } from '../calc';
 import { buildExportRows, rowsToCsv, downloadCsv } from '../export';
 import { cn, fmtMoney, fmtPct, fmtNum } from '../utils';
 import ResultsPanel from './ResultsPanel';
 import BaseParamsPanel from './BaseParamsPanel';
 import ChannelSimConfigPanel from './ChannelSimConfigPanel';
+import SpecialDemandPanel from './SpecialDemandPanel';
 import MarketEnvironmentTab from './MarketEnvironmentTab';
 
 const CLASS_OPTIONS = ['酒管25088', '酒管25089', '酒管25090', '酒管25091'];
@@ -159,7 +161,7 @@ export default function TeacherDashboard({ onLogout }: Props) {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [gRes, dRes, subRes, settingsRes, openRes] = await Promise.all([
+      const [gRes, dRes, subRes, settingsRes, openRes, factorRes] = await Promise.all([
         // Explicit column lists for `groups` and `app_settings`: the hardening
         // migration revokes table-wide SELECT on both (password columns and the
         // teacher password hash must not be readable), so `select *` fails.
@@ -178,6 +180,7 @@ export default function TeacherDashboard({ onLogout }: Props) {
             .maybeSingle(),
         ),
         supabaseFetch(() => supabase.from('open_weeks').select('*').order('opened_at')),
+        supabaseFetch(() => supabase.from('special_demand_factors').select('*').eq('is_active', true).order('sort_order')),
       ]);
       // Supabase query builders resolve with { data: null, error } rather than
       // throwing, so every read must be inspected explicitly.
@@ -187,6 +190,7 @@ export default function TeacherDashboard({ onLogout }: Props) {
       if (subRes.error) readFailures.push('提交记录：' + describeError(subRes.error));
       if (settingsRes.error) readFailures.push('平台设置：' + describeError(settingsRes.error));
       if (openRes.error) readFailures.push('开放周次：' + describeError(openRes.error));
+      if (factorRes.error) readFailures.push('特殊需求因素：' + describeError(factorRes.error));
       if (!settingsRes.data) readFailures.push('平台设置：未读取到配置记录');
       if (readFailures.length > 0) {
         setLoadError(readFailures.join('；'));
@@ -197,6 +201,7 @@ export default function TeacherDashboard({ onLogout }: Props) {
       setGroups((gRes.data as GroupRow[]) || []);
       setDecisions((dRes.data as DecisionRow[]) || []);
       setWeekSubmissions((subRes.data as WeekSubmissionRow[]) || []);
+      registerActiveFactors((factorRes.data as SpecialDemandFactor[] | null) ?? []);
       setOpenWeeks((openRes.data as OpenWeekRow[]) || []);
       if (settingsRes.data) {
         const s = settingsRes.data as AppSettingsRow;
@@ -959,6 +964,19 @@ export default function TeacherDashboard({ onLogout }: Props) {
                 }}
               />
             )}
+
+            <div>
+              <h2 className="text-base font-semibold text-slate-800">特殊需求因素</h2>
+              <p className="text-sm text-slate-500 mt-0.5">
+                设置影响本周需求的特殊因素（活动、节假日、天气、竞争等），并查看各小组的应变情况。
+              </p>
+            </div>
+            <SpecialDemandPanel
+              groups={groups}
+              decisionMap={decisionMap}
+              baseParams={baseParams}
+              currentWeekKey={currentWeekKey}
+            />
 
             <div>
               <h2 className="text-base font-semibold text-slate-800">渠道成交算法参数</h2>

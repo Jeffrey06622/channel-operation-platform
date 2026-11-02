@@ -43,6 +43,7 @@ import type { LucideIcon } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import { supabaseFetch, isNetworkError, isRpcMissing, describeError } from '../supabaseRequest';
 import { hashPassword } from '../auth';
+import { FACTOR_KEY_PREFIX, registerActiveFactors, studentSelectableFactors } from '../specialDemand';
 import {
   WEEKS,
   SPECIAL_FACTORS,
@@ -55,6 +56,7 @@ import {
   resolveChannels,
   resolveRoomTypes,
   resolveTotalRooms,
+  getRegisteredSpecialFactor,
 } from '../domain';
 import type {
   AppSettingsRow,
@@ -66,6 +68,8 @@ import type {
   OpenWeekRow,
   RoomTypeKey,
   WeekDecision,
+  SpecialDemandFactor,
+  SpecialFactorMeta,
   WeekSubmissionRow,
 } from '../types';
 import {
@@ -164,6 +168,7 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
   const [openWeekKeys, setOpenWeekKeys] = useState<Set<string>>(new Set());
   const [baseParams, setBaseParams] = useState<BaseParams | null>(null);
   const [channelSim, setChannelSim] = useState<ChannelSimConfig | null>(null);
+  const [specialFactors, setSpecialFactors] = useState<SpecialDemandFactor[]>([]);
   const [submissionDeadline, setSubmissionDeadline] = useState<string | null>(null);
   const [lateSubmitDeadline, setLateSubmitDeadline] = useState<string | null>(null);
   const [benchmarkFiscalYear, setBenchmarkFiscalYear] = useState(2025);
@@ -276,7 +281,10 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
   const loadData = useCallback(async () => {
     setLoading(true);
 
-    const [settingsRes, decRes, subRes, openRes] = await Promise.all([
+    const [settingsRes, decRes, subRes, openRes, factorRes] = await Promise.all([
+      supabaseFetch(() =>
+        supabase.from('special_demand_factors').select('*').eq('is_active', true).order('sort_order'),
+      ),
       supabaseFetch(() =>
         supabase
           .from('app_settings')
@@ -321,6 +329,10 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
     }
 
     setOpenWeekKeys(new Set((openRes.data as OpenWeekRow[] | null)?.map((r) => r.week_key) ?? []));
+
+    const factorRows = factorRes.error ? [] : ((factorRes.data as SpecialDemandFactor[] | null) ?? []);
+    registerActiveFactors(factorRows);
+    setSpecialFactors(factorRows);
 
     let sBaseParams: BaseParams | null = null;
     if (settingsRes.data) {
@@ -823,6 +835,10 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
     activeWeek !== 'summary' && activeWeek !== 'history' ? payload.weeks[activeWeek] : null;
 
   const activeWeekMeta = WEEKS.find((w) => w.key === activeWeek);
+  const availableFactors: SpecialFactorMeta[] = [
+    ...SPECIAL_FACTORS,
+    ...studentSelectableFactors(specialFactors, activeWeekMeta ?? WEEKS[0]),
+  ];
 
   async function handleChangePassword() {
     setPwdError('');
@@ -1170,6 +1186,7 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
               isCurrentWeek={isWeekOpen(activeWeek)}
               onChannelUpdate={updateChannel}
               onToggleFactor={toggleFactor}
+              availableFactors={availableFactors}
               onToggleWeekendPricing={toggleWeekendPricing}
               onToggleWeekendDay={toggleWeekendDay}
               onUpdateWeekendPrice={updateWeekendPrice}
@@ -1417,7 +1434,7 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
         </div>
       )}
       {showRulesModal && (
-        <RulesModal channels={resolvedChannels} roomTypes={resolvedRoomTypes} totalRooms={resolvedTotalRooms} onClose={() => setShowRulesModal(false)} />
+        <RulesModal channels={resolvedChannels} roomTypes={resolvedRoomTypes} totalRooms={resolvedTotalRooms} availableFactors={availableFactors} onClose={() => setShowRulesModal(false)} />
       )}
     </div>
   );
@@ -1430,7 +1447,7 @@ interface RulesModalProps {
   onClose: () => void;
 }
 
-function RulesModal({ channels, roomTypes, totalRooms, onClose }: RulesModalProps) {
+function RulesModal({ channels, roomTypes, totalRooms, availableFactors, onClose }: RulesModalProps) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4" onClick={onClose}>
       <div
@@ -1524,7 +1541,7 @@ function RulesModal({ channels, roomTypes, totalRooms, onClose }: RulesModalProp
               每周可勾选若干特殊因素，它们会按系数叠加影响本周的需求量（最终出租率 = 基准出租率 × 所有因素系数乘积 × 价格弹性）。
             </p>
             <div className="space-y-1.5">
-              {SPECIAL_FACTORS.map((f) => (
+              {availableFactors.map((f) => (
                 <div key={f.key} className="flex items-center justify-between px-3 py-2 bg-slate-50 rounded-lg">
                   <div className="flex items-center gap-2">
                     {(() => {
@@ -1627,6 +1644,7 @@ interface WeekFormProps {
   weekDecision: WeekDecision;
   isLocked: boolean;
   isCurrentWeek: boolean;
+  availableFactors: SpecialFactorMeta[];
   onChannelUpdate: (
     weekKey: string,
     channelKey: ChannelKey,
@@ -1668,6 +1686,7 @@ function WeekForm({
   isCurrentWeek,
   onChannelUpdate,
   onToggleFactor,
+  availableFactors,
   onToggleWeekendPricing,
   onToggleWeekendDay,
   onUpdateWeekendPrice,
@@ -1906,8 +1925,13 @@ function WeekForm({
         <p className="text-xs text-slate-400 mb-4">
           勾选后自动关联需求影响系数，影响本周预估出租率
         </p>
+        {availableFactors.some((f) => f.key.startsWith(FACTOR_KEY_PREFIX)) && (
+          <div className="mb-4 px-3 py-2 bg-sky-50 border border-sky-200 rounded-lg text-xs text-sky-800 leading-relaxed">
+            本周教师发布了额外的特殊需求因素，可按需勾选，勾选后会计入预估。
+          </div>
+        )}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          {SPECIAL_FACTORS.map((f) => {
+          {availableFactors.map((f) => {
             const checked = (weekDecision.specialFactors ?? []).includes(f.key);
             const Icon = FACTOR_ICONS[f.key] || Info;
             return (
@@ -1935,8 +1959,11 @@ function WeekForm({
                     <CheckCircle2 className="w-4 h-4 text-amber-500" />
                   )}
                 </div>
-                <div className="text-sm font-medium text-slate-800">
+                <div className="text-sm font-medium text-slate-800 flex items-center gap-1.5">
                   {f.name}
+                  {f.key.startsWith(FACTOR_KEY_PREFIX) && (
+                    <span className="px-1.5 py-0.5 rounded bg-sky-100 text-sky-700 text-[10px] font-semibold">教师录入</span>
+                  )}
                 </div>
                 <div
                   className={cn(
@@ -2725,7 +2752,7 @@ function HistoryReview({ payload, cycleResult, submittedWeeks, baseParams }: His
           </div>
           <div className="flex flex-wrap gap-2">
             {(weekDecision.specialFactors ?? []).map((fk) => {
-              const meta = SPECIAL_FACTORS.find((s) => s.key === fk);
+              const meta = getRegisteredSpecialFactor(fk);
               if (!meta) return null;
               const Icon = FACTOR_ICONS[fk] || Info;
               return (
