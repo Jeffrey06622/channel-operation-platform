@@ -1,12 +1,33 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Hotel, KeyRound, GraduationCap, Users, Lock, BookOpen, Eye, EyeOff, Loader2 } from 'lucide-react';
+import { Hotel, KeyRound, GraduationCap, Users, Lock, BookOpen, Eye, EyeOff, Loader2, RefreshCw } from 'lucide-react';
 import { supabase } from '../supabaseClient';
-import { supabaseFetch, isNetworkError, isRpcMissing } from '../supabaseRequest';
+import { supabaseFetch, isTransportError, isRpcMissing, describeError } from '../supabaseRequest';
 import { verifyPassword, verifyTeacherPassword, setTeacherSecret } from '../auth';
 import type { GroupRow } from '../types';
 import { cn } from '../utils';
 
-const CLASS_OPTIONS = ['酒管25088', '酒管25089', '酒管25090', '酒管25091'];
+const FALLBACK_CLASS_OPTIONS = ['酒管25088', '酒管25089', '酒管25090', '酒管25091'];
+const LOGIN_RETRY_DELAY_MS = 600;
+
+async function retryOnceOnTransportError<T>(attempt: () => Promise<T>): Promise<T> {
+  try {
+    return await attempt();
+  } catch (err) {
+    if (!isTransportError(err)) throw err;
+    await new Promise((resolve) => setTimeout(resolve, LOGIN_RETRY_DELAY_MS));
+    return attempt();
+  }
+}
+
+async function callGroupLogin(groupId: string, password: string) {
+  const primary = await supabaseFetch(() =>
+    supabase.rpc('login_group', { p_group_id: groupId, p_password: password }),
+  );
+  if (!isRpcMissing(primary.error)) return primary;
+  return supabaseFetch(() =>
+    supabase.rpc('verify_group_login', { p_group_id: groupId, p_password: password }),
+  );
+}
 
 interface Props {
   onGroupLogin: (group: GroupRow) => void;
@@ -25,11 +46,36 @@ export default function LoginScreen({ onGroupLogin, onTeacherLogin }: Props) {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [loadingGroups, setLoadingGroups] = useState(false);
+  const [groupsError, setGroupsError] = useState('');
   const [connecting, setConnecting] = useState(false);
+  const [classOptions, setClassOptions] = useState<string[]>(FALLBACK_CLASS_OPTIONS);
+
+  useEffect(() => {
+    let cancelled = false;
+    supabaseFetch(() => supabase.from('groups').select('class_label'))
+      .then(({ data, error: qErr }) => {
+        if (cancelled || qErr || !data) return;
+        const labels = [
+          ...new Set(
+            (data as { class_label: string | null }[])
+              .map((row) => row.class_label)
+              .filter((label): label is string => !!label),
+          ),
+        ].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+        if (labels.length > 0) setClassOptions(labels);
+      })
+      .catch(() => {
+        // Keep the fallback class list when the database cannot be reached.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const fetchGroups = useCallback(async (cls: string) => {
     if (!cls) { setGroupList([]); return; }
     setLoadingGroups(true);
+    setGroupsError('');
     try {
       const { data, error: qErr } = await supabaseFetch(() =>
         supabase
@@ -45,11 +91,7 @@ export default function LoginScreen({ onGroupLogin, onTeacherLogin }: Props) {
       setGroupList((data as GroupRow[]) || []);
     } catch (err) {
       setGroupList([]);
-      if (isNetworkError(err)) {
-        setError(
-          '无法连接数据库服务器：请切换网络（Wi-Fi ↔ 手机流量）后刷新重试；若持续失败请告知老师',
-        );
-      }
+      setGroupsError(describeError(err));
     } finally {
       setLoadingGroups(false);
     }
@@ -92,11 +134,8 @@ export default function LoginScreen({ onGroupLogin, onTeacherLogin }: Props) {
       // the password hash never needs to be readable by the browser. The
       // legacy client-side path stays as a fallback until the database
       // migration introducing the RPC has been applied.
-      const { data: verifyData, error: verifyErr } = await supabaseFetch(() =>
-        supabase.rpc('verify_group_login', {
-          p_group_id: selected.id,
-          p_password: groupPassword,
-        }),
+      const { data: verifyData, error: verifyErr } = await retryOnceOnTransportError(() =>
+        callGroupLogin(selected.id, groupPassword),
       );
       if (!verifyErr) {
         if (!verifyData || (verifyData as { ok?: boolean }).ok !== true) {
@@ -104,20 +143,24 @@ export default function LoginScreen({ onGroupLogin, onTeacherLogin }: Props) {
           setLoading(false);
           return;
         }
-        const { data: rowData, error: rowErr } = await supabaseFetch(() =>
-          supabase
-            .from('groups')
-            .select('id, name, hotel_name, class_label, created_at')
-            .eq('id', selected.id)
-            .maybeSingle(),
-        );
-        if (rowErr) throw rowErr;
-        if (!rowData) {
+        let group = (verifyData as { group?: GroupRow } | null)?.group ?? null;
+        if (!group) {
+          const { data: rowData, error: rowErr } = await supabaseFetch(() =>
+            supabase
+              .from('groups')
+              .select('id, name, hotel_name, class_label, created_at')
+              .eq('id', selected.id)
+              .maybeSingle(),
+          );
+          if (rowErr) throw rowErr;
+          group = (rowData as GroupRow | null) ?? null;
+        }
+        if (!group) {
           setError('未找到此小组，请联系老师');
           setLoading(false);
           return;
         }
-        onGroupLogin(rowData as GroupRow);
+        onGroupLogin(group);
       } else if (isRpcMissing(verifyErr)) {
         // Legacy path (migration not applied yet): read the hash and verify
         // in the browser, as the original code did.
@@ -145,11 +188,7 @@ export default function LoginScreen({ onGroupLogin, onTeacherLogin }: Props) {
         throw verifyErr;
       }
     } catch (err) {
-      if (isNetworkError(err)) {
-        setError('网络不佳，请检查网络后重试');
-      } else {
-        setError(err instanceof Error ? err.message : '登录失败');
-      }
+      setError(describeError(err));
       setLoading(false);
     }
   }
@@ -166,8 +205,10 @@ export default function LoginScreen({ onGroupLogin, onTeacherLogin }: Props) {
       // Preferred path: server-side verification via verify_teacher_login.
       // The legacy path stays as a fallback until the database migration
       // introducing the RPC has been applied.
-      const { data: verifyData, error: verifyErr } = await supabaseFetch(() =>
-        supabase.rpc('verify_teacher_login', { p_password: teacherPassword }),
+      const { data: verifyData, error: verifyErr } = await retryOnceOnTransportError(() =>
+        supabaseFetch(() =>
+          supabase.rpc('verify_teacher_login', { p_password: teacherPassword }),
+        ),
       );
       if (!verifyErr) {
         const reason = (verifyData as { ok?: boolean; reason?: string } | null);
@@ -216,11 +257,7 @@ export default function LoginScreen({ onGroupLogin, onTeacherLogin }: Props) {
         throw verifyErr;
       }
     } catch (err) {
-      if (isNetworkError(err)) {
-        setError('网络不佳，请检查网络后重试');
-      } else {
-        setError(err instanceof Error ? err.message : '登录失败');
-      }
+      setError(describeError(err));
     }
     setLoading(false);
   }
@@ -295,7 +332,7 @@ export default function LoginScreen({ onGroupLogin, onTeacherLogin }: Props) {
                     <option value="" disabled className="bg-slate-800 text-slate-400">
                       请选择班级
                     </option>
-                    {CLASS_OPTIONS.map((c) => (
+                    {classOptions.map((c) => (
                       <option key={c} value={c} className="bg-slate-800 text-white">
                         {c}
                       </option>
@@ -338,6 +375,20 @@ export default function LoginScreen({ onGroupLogin, onTeacherLogin }: Props) {
                     <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-amber-400 animate-spin" />
                   )}
                 </div>
+                {groupsError && (
+                  <div className="mt-2 flex items-center justify-between gap-3 px-3 py-2 bg-red-500/10 border border-red-500/20 rounded-lg">
+                    <p className="text-xs text-red-300">{groupsError}</p>
+                    <button
+                      type="button"
+                      onClick={() => fetchGroups(classLabel)}
+                      disabled={loadingGroups}
+                      className="shrink-0 inline-flex items-center gap-1 text-xs font-medium text-red-200 hover:text-white transition disabled:opacity-50"
+                    >
+                      <RefreshCw className={cn('w-3.5 h-3.5', loadingGroups && 'animate-spin')} />
+                      重新加载
+                    </button>
+                  </div>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium text-slate-300 mb-1.5">

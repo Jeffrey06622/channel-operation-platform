@@ -1,7 +1,11 @@
 import { supabase } from './supabaseClient';
+import { withGate } from './netGate';
 
-const TIMEOUT_MS = 15000;
-const MAX_RETRIES = 2;
+const TIMEOUT_MS = 8000;
+const MAX_RETRIES = 1;
+const RETRY_DELAY_MS = 800;
+
+let callSeq = 0;
 
 export class NetworkError extends Error {
   constructor(message: string, cause?: unknown) {
@@ -49,26 +53,34 @@ function withTimeout<T>(promise: Promise<T>): Promise<T> {
   });
 }
 
-export async function supabaseFetch<T>(
-  operation: () => PromiseLike<T> | Promise<T>,
-): Promise<T> {
+async function runWithRetry<T>(operation: () => PromiseLike<T> | Promise<T>): Promise<T> {
   let lastError: unknown = new NetworkError('请求失败');
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const result = await withTimeout(Promise.resolve(operation()));
-      return result;
+      return await withTimeout(Promise.resolve(operation()));
     } catch (err) {
       lastError = err;
       // A database or business-rule error is deterministic: retrying cannot
       // help, and replacing its message with a generic one hides the cause.
       if (!isTransportError(err)) throw err;
-      if (attempt < MAX_RETRIES) {
-        await sleep(Math.pow(2, attempt) * 1000);
-      }
+      if (attempt < MAX_RETRIES) await sleep(RETRY_DELAY_MS);
     }
   }
   if (lastError instanceof NetworkError) throw lastError;
   throw new NetworkError('网络不佳，请检查网络后重试', lastError);
+}
+
+/**
+ * Pass an explicit `key` only for identical read-only queries. Without one,
+ * every call is independent: keys derived from source text would merge two
+ * different queries issued from the same line.
+ */
+export async function supabaseFetch<T>(
+  operation: () => PromiseLike<T> | Promise<T>,
+  options?: { key?: string },
+): Promise<T> {
+  const key = options?.key ?? `call:${++callSeq}`;
+  return withGate(key, () => runWithRetry(operation));
 }
 
 export function isNetworkError(err: unknown): boolean {

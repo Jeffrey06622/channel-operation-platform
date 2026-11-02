@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { Suspense, lazy, useState } from 'react';
+import { Loader2 } from 'lucide-react';
 import ErrorBoundary from './components/ErrorBoundary';
 import LoginScreen from './components/LoginScreen';
-import StudentDashboard from './components/StudentDashboard';
-import TeacherDashboard from './components/TeacherDashboard';
 import { clearTeacherSecret } from './auth';
 import type { GroupRow } from './types';
+
+const StudentDashboard = lazy(() => import('./components/StudentDashboard'));
+const TeacherDashboard = lazy(() => import('./components/TeacherDashboard'));
 
 const STORAGE_KEY = 'hotel-decision-session';
 
@@ -90,7 +92,19 @@ function App() {
     content = <TeacherDashboard onLogout={() => updateSession({ role: 'guest' })} />;
   }
 
-  return <ErrorBoundary>{content}</ErrorBoundary>;
+  return (
+    <ErrorBoundary>
+      <Suspense
+        fallback={
+          <div className="min-h-screen flex items-center justify-center bg-slate-50">
+            <Loader2 className="w-6 h-6 text-amber-500 animate-spin" />
+          </div>
+        }
+      >
+        {content}
+      </Suspense>
+    </ErrorBoundary>
+  );
 }
 
 export default App;

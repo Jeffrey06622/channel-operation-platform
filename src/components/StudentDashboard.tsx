@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useCallback, useRef, Fragment, type ReactNode } from 'react';
+import { useMemo, useState, useEffect, useCallback, useRef, Fragment, lazy, Suspense, type ReactNode } from 'react';
 import {
   Plane,
   Utensils,
@@ -81,7 +81,7 @@ import {
 import type { QuotaOverview, QuotaOverviewRow, QuotaPeriodUsage, QuotaStatus } from '../calc';
 import { cn, fmtMoney, fmtPct, fmtNum } from '../utils';
 import ResultsPanel from './ResultsPanel';
-import MarketReferencePage from './MarketReferencePage';
+const MarketReferencePage = lazy(() => import('./MarketReferencePage'));
 
 const ICONS: Record<string, LucideIcon> = {
   ctrip: Plane,
@@ -903,6 +903,7 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
 
   if (viewMode === 'market') {
     return (
+      <Suspense fallback={<div className="min-h-screen bg-slate-50" />}>
       <MarketReferencePage
         fiscalYear={benchmarkFiscalYear}
         hotelClass={benchmarkHotelClass}
@@ -920,6 +921,7 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
           setViewMode('decision');
         }}
       />
+      </Suspense>
     );
   }
 
