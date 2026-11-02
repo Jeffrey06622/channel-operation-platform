@@ -106,8 +106,10 @@ function validateDraft(draft: FactorDraft, week: WeekMeta): string | null {
   if (draft.effective_from && draft.effective_to && draft.effective_from > draft.effective_to) {
     return '生效结束日期不能早于开始日期';
   }
-  if (draft.effective_from && draft.effective_from > week.endDate) return '生效开始日期晚于本周结束';
-  if (draft.effective_to && draft.effective_to < week.startDate) return '生效结束日期早于本周开始';
+  const overlaps =
+    (!draft.effective_from || draft.effective_from <= week.endDate) &&
+    (!draft.effective_to || draft.effective_to >= week.startDate);
+  if (!overlaps) return `生效区间与所选周（${week.startDate} ~ ${week.endDate}）无交集`;
   if (draft.description.length > 200) return '说明不超过 200 个字';
   return null;
 }
@@ -147,7 +149,7 @@ export default function SpecialDemandPanel({ groups, decisionMap, baseParams, cu
   const [factors, setFactors] = useState<SpecialDemandFactor[]>([]);
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>('loading');
   const [loadErrorDetail, setLoadErrorDetail] = useState('');
-  const [drawer, setDrawer] = useState<{ factor: SpecialDemandFactor | null } | null>(null);
+  const [drawer, setDrawer] = useState<{ factor: SpecialDemandFactor | null; week: WeekMeta } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<{ factor: SpecialDemandFactor; refs: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState('');
@@ -189,19 +191,25 @@ export default function SpecialDemandPanel({ groups, decisionMap, baseParams, cu
 
   const weekFactors = useMemo(() => factors.filter((f) => f.week_key === weekKey), [factors, weekKey]);
 
-  async function handleSave(draft: FactorDraft, editing: SpecialDemandFactor | null): Promise<string | null> {
-    const error = validateDraft(draft, week);
+  function openDrawer(factor: SpecialDemandFactor | null) {
+    const selected = WEEKS.find((w) => w.key === weekKey) ?? WEEKS[0];
+    setDrawer({ factor, week: selected });
+  }
+
+  async function handleSave(draft: FactorDraft, editing: SpecialDemandFactor | null, target: WeekMeta): Promise<string | null> {
+    const error = validateDraft(draft, target);
     if (error) return error;
     setBusy(true);
     const now = new Date().toISOString();
+    const targetCount = factors.filter((f) => f.week_key === target.key).length;
     const res = editing
       ? await supabase
           .from('special_demand_factors')
-          .update({ ...draftToRow(draft, weekKey, editing.sort_order), updated_at: now })
+          .update({ ...draftToRow(draft, target.key, editing.sort_order), updated_at: now })
           .eq('id', editing.id)
       : await supabase
           .from('special_demand_factors')
-          .insert(draftToRow(draft, weekKey, weekFactors.length + 1));
+          .insert(draftToRow(draft, target.key, targetCount + 1));
     setBusy(false);
     if (res.error) {
       console.error('special demand factor save failed', res.error);
@@ -364,7 +372,7 @@ export default function SpecialDemandPanel({ groups, decisionMap, baseParams, cu
               </button>
               <button
                 type="button"
-                onClick={() => setDrawer({ factor: null })}
+                onClick={() => openDrawer(null)}
                 disabled={busy}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 text-white text-sm hover:bg-slate-700 disabled:opacity-40 transition-colors"
               >
@@ -429,7 +437,7 @@ export default function SpecialDemandPanel({ groups, decisionMap, baseParams, cu
                     <div className="flex items-center gap-1">
                       <button
                         type="button"
-                        onClick={() => setDrawer({ factor: f })}
+                        onClick={() => openDrawer(f)}
                         className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800 transition-colors"
                         aria-label="编辑因素"
                       >
@@ -465,12 +473,12 @@ export default function SpecialDemandPanel({ groups, decisionMap, baseParams, cu
       {drawer && (
         <FactorDrawer
           key={drawer.factor?.id ?? 'new'}
-          week={week}
+          week={drawer.week}
           baseParams={baseParams}
           editing={drawer.factor}
           busy={busy}
           onClose={() => setDrawer(null)}
-          onSubmit={(draft) => handleSave(draft, drawer.factor)}
+          onSubmit={(draft) => handleSave(draft, drawer.factor, drawer.week)}
         />
       )}
 
