@@ -12,9 +12,12 @@ import type {
   SpecialDemandExpected,
   SpecialDemandFactor,
   SpecialFactorMeta,
+  WeekDecision,
   WeekMeta,
+  ChannelDecision,
 } from './types';
 import { priceMin, registerSpecialFactors, resolveChannels, resolveRoomTypes } from './domain';
+import { asArray, asObjectMap } from './arrayUtil';
 
 export const FACTOR_KEY_PREFIX = 'sd_';
 
@@ -45,8 +48,8 @@ export function expectedResponseLabel(expected: SpecialDemandExpected): string {
   return EXPECTED_LABELS[expected] ?? expected;
 }
 
-export function factorKeyOf(factor: Pick<SpecialDemandFactor, 'id'>): string {
-  return FACTOR_KEY_PREFIX + factor.id.replace(/-/g, '').slice(0, 8);
+export function factorKeyOf(factor: Pick<SpecialDemandFactor, 'id'> | null | undefined): string {
+  return FACTOR_KEY_PREFIX + String(factor?.id ?? '').replace(/-/g, '').slice(0, 8);
 }
 
 export function isFactorEffective(factor: SpecialDemandFactor, week: WeekMeta): boolean {
@@ -62,24 +65,27 @@ function namesOf(keys: string[], list: { key: string; name: string }[]): string 
   return names.length > 0 ? names.join('、') : '未选择';
 }
 
-function scopeKeysOf(factor: SpecialDemandFactor): string[] {
-  return Array.isArray(factor.scope_keys) ? factor.scope_keys : [];
+function scopeKeysOf(factor: SpecialDemandFactor | null | undefined): string[] {
+  return asArray<string>(factor?.scope_keys);
 }
 
-export function describeScope(factor: SpecialDemandFactor, baseParams?: BaseParams | null): string {
+export function describeScope(factor: SpecialDemandFactor | null | undefined, baseParams?: BaseParams | null): string {
   const scopeKeys = scopeKeysOf(factor);
   const rooms =
-    factor.scope_type === 'room_type'
+    factor?.scope_type === 'room_type'
       ? namesOf(scopeKeys, resolveRoomTypes(baseParams))
       : '全部房型';
   const channels =
-    factor.scope_type === 'channel'
+    factor?.scope_type === 'channel'
       ? namesOf(scopeKeys, resolveChannels(baseParams))
       : '全部渠道';
   return `${rooms}／${channels}`;
 }
 
-export function describeTrigger(factor: Pick<SpecialDemandFactor, 'expected_response' | 'threshold'>): string {
+export function describeTrigger(
+  factor: Pick<SpecialDemandFactor, 'expected_response' | 'threshold'> | null | undefined,
+): string {
+  if (!factor) return '';
   const t = factor.threshold;
   switch (factor.expected_response) {
     case 'raise_price':
@@ -106,6 +112,11 @@ const noData = (detail: string): GroupEvaluation => ({
   metric_value: null,
   detail,
 });
+
+function cellAt(channels: Record<string, ChannelDecision>, channelKey: string, roomKey: string): RoomTypeDecision | undefined {
+  const cell = asObjectMap<RoomTypeDecision>(channels[channelKey]?.roomTypes)[roomKey];
+  return cell && typeof cell === 'object' ? cell : undefined;
+}
 
 function cellPrice(cell: RoomTypeDecision, week: WeekMeta): number | null {
   const wd = cell.weekday_price;
@@ -136,15 +147,19 @@ export function evaluateGroupResponse(
   payload: DecisionPayload | null | undefined,
   baseParams: BaseParams | null,
 ): GroupEvaluation {
-  const weekDecision = payload?.weeks?.[week.key];
-  if (!weekDecision?.channels) return noData('本周未提交决策');
+  const weekDecision = asObjectMap<WeekDecision>(payload?.weeks)[week?.key ?? ''];
+  if (!weekDecision || typeof weekDecision !== 'object' || !weekDecision.channels) {
+    return noData('本周未提交决策');
+  }
+  const channels = asObjectMap<ChannelDecision>(weekDecision.channels);
 
   const allChannelKeys = resolveChannels(baseParams).map((c) => c.key);
   const allRooms = resolveRoomTypes(baseParams);
-  const affectedChannels = factor.scope_type === 'channel' ? scopeKeysOf(factor) : allChannelKeys;
+  const scopeKeys = scopeKeysOf(factor);
+  const affectedChannels = factor?.scope_type === 'channel' ? scopeKeys : allChannelKeys;
   const affectedRooms =
-    factor.scope_type === 'room_type'
-      ? allRooms.filter((r) => scopeKeysOf(factor).includes(r.key))
+    factor?.scope_type === 'room_type'
+      ? allRooms.filter((r) => scopeKeys.includes(r.key))
       : allRooms;
 
   let affectedQuota = 0;
@@ -155,7 +170,7 @@ export function evaluateGroupResponse(
   let weightSum = 0;
   for (const channelKey of affectedChannels) {
     for (const room of affectedRooms) {
-      const cell = weekDecision.channels[channelKey]?.roomTypes?.[room.key];
+      const cell = cellAt(channels, channelKey, room.key);
       if (!cell) continue;
       const quota = cellQuota(cell);
       if (quota != null) {
@@ -178,7 +193,7 @@ export function evaluateGroupResponse(
   let allQuota = 0;
   for (const channelKey of allChannelKeys) {
     for (const room of allRooms) {
-      const cell = weekDecision.channels[channelKey]?.roomTypes?.[room.key];
+      const cell = cellAt(channels, channelKey, room.key);
       const quota = cell ? cellQuota(cell) : null;
       if (quota != null) allQuota += quota;
     }
@@ -191,10 +206,10 @@ export function evaluateGroupResponse(
   const quotaUse = capacity > 0 ? (affectedQuota / capacity) * 100 : 0;
   const quotaShare = allQuota > 0 ? (affectedQuota / allQuota) * 100 : 0;
 
-  const t = factor.threshold;
+  const t = factor?.threshold ?? 0;
   let hit: boolean;
   let metric: number;
-  switch (factor.expected_response) {
+  switch (factor?.expected_response) {
     case 'raise_price':
       hit = priceExec >= t;
       metric = priceExec;
@@ -245,23 +260,23 @@ function compareOf(
   return 'on_par';
 }
 
-function toFactorMeta(f: SpecialDemandFactor): SpecialFactorMeta {
+function toFactorMeta(f: SpecialDemandFactor | null | undefined): SpecialFactorMeta {
   return {
     key: factorKeyOf(f),
-    name: f.name,
-    demandMultiplier: f.demand_multiplier,
-    description: f.description,
+    name: f?.name ?? '',
+    demandMultiplier: f?.demand_multiplier ?? 1,
+    description: f?.description ?? '',
   };
 }
 
 export function registerActiveFactors(rows: SpecialDemandFactor[]): void {
-  if (!Array.isArray(rows)) return;
-  registerSpecialFactors(rows.filter((f) => f.is_active).map(toFactorMeta));
+  registerSpecialFactors(asArray<SpecialDemandFactor>(rows).filter((f) => f && f.is_active).map(toFactorMeta));
 }
 
-export function studentSelectableFactors(rows: SpecialDemandFactor[], week: WeekMeta): SpecialFactorMeta[] {
-  if (!Array.isArray(rows)) return [];
-  return rows.filter((f) => f.student_selectable && isFactorEffective(f, week)).map(toFactorMeta);
+export function studentSelectableFactors(rows: SpecialDemandFactor[], week: WeekMeta | undefined): SpecialFactorMeta[] {
+  return asArray<SpecialDemandFactor>(rows)
+    .filter((f) => f && f.student_selectable === true && isFactorEffective(f, week as WeekMeta))
+    .map(toFactorMeta);
 }
 
 export function buildResponseMatrix(
@@ -271,13 +286,13 @@ export function buildResponseMatrix(
   week: WeekMeta,
   baseParams: BaseParams | null,
 ): FactorResponseMatrix[] {
-  const factorList = Array.isArray(factors) ? factors : [];
-  const groupList = Array.isArray(groups) ? groups : [];
-  const decisions = decisionMap instanceof Map ? decisionMap : new Map<string, DecisionRow>();
-  return factorList.map((factor) => {
-    const evaluations = groupList.map((g) => ({
+  const fs = asArray<SpecialDemandFactor>(factors).filter((f) => f != null);
+  const gs = asArray<GroupRow>(groups).filter((g) => g != null);
+  const dm: Map<string, DecisionRow> = decisionMap instanceof Map ? decisionMap : new Map();
+  return fs.map((factor) => {
+    const evaluations = gs.map((g) => ({
       group: g,
-      result: evaluateGroupResponse(factor, week, decisions.get(g.id)?.payload, baseParams),
+      result: evaluateGroupResponse(factor, week, dm.get(g.id)?.payload, baseParams),
     }));
     const values = evaluations
       .map((e) => e.result.metric_value)
@@ -301,7 +316,7 @@ export function buildResponseMatrix(
       trigger_text: describeTrigger(factor),
       rows,
       responded_count: rows.filter((r) => r.status === 'responded').length,
-      total_groups: groupList.length,
+      total_groups: gs.length,
       median: percentile(values, 0.5),
     };
   });

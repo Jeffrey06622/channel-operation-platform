@@ -9,6 +9,7 @@ interface State {
   hasError: boolean;
   error: Error | null;
   isNetworkError: boolean;
+  componentStack: string | null;
 }
 
 export default class ErrorBoundary extends Component<Props, State> {
@@ -16,7 +17,7 @@ export default class ErrorBoundary extends Component<Props, State> {
 
   constructor(props: Props) {
     super(props);
-    this.state = { hasError: false, error: null, isNetworkError: false };
+    this.state = { hasError: false, error: null, isNetworkError: false, componentStack: null };
   }
 
   static getDerivedStateFromError(error: Error): State {
@@ -25,11 +26,12 @@ export default class ErrorBoundary extends Component<Props, State> {
       error.message.includes('network') ||
       error.message.includes('timeout') ||
       error.message.includes('超时');
-    return { hasError: true, error, isNetworkError: isNetwork };
+    return { hasError: true, error, isNetworkError: isNetwork, componentStack: null };
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error('ErrorBoundary caught:', error, info);
+    console.error('ErrorBoundary caught:', error, info.componentStack);
+    this.setState({ componentStack: info.componentStack ?? null });
   }
 
   componentDidMount() {
@@ -54,7 +56,7 @@ export default class ErrorBoundary extends Component<Props, State> {
   }
 
   handleReset = () => {
-    this.setState({ hasError: false, error: null, isNetworkError: false });
+    this.setState({ hasError: false, error: null, isNetworkError: false, componentStack: null });
   };
 
   // Safe reset: clears the cached session and reloads, forcing a fresh login
@@ -133,6 +135,25 @@ export default class ErrorBoundary extends Component<Props, State> {
               <p className="text-xs text-slate-400 mt-1">
                 如问题持续，请联系授课教师协助处理
               </p>
+              {this.state.error && (
+                <details className="text-left bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs text-slate-600">
+                  <summary className="cursor-pointer select-none font-medium text-slate-700">显示技术详情</summary>
+                  <div className="mt-2 space-y-2 select-text">
+                    <div>
+                      <div className="font-semibold text-slate-700">错误信息</div>
+                      <pre className="font-mono whitespace-pre-wrap break-all">{this.state.error.message}</pre>
+                    </div>
+                    <div>
+                      <div className="font-semibold text-slate-700">错误堆栈（前 20 行）</div>
+                      <pre className="font-mono whitespace-pre-wrap break-all">{(this.state.error.stack ?? '').split('\n').slice(0, 20).join('\n')}</pre>
+                    </div>
+                    <div>
+                      <div className="font-semibold text-slate-700">组件堆栈（前 20 行）</div>
+                      <pre className="font-mono whitespace-pre-wrap break-all">{(this.state.componentStack ?? '').split('\n').slice(0, 20).join('\n')}</pre>
+                    </div>
+                  </div>
+                </details>
+              )}
             </div>
           </div>
         </div>

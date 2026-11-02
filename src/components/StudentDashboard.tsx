@@ -44,6 +44,7 @@ import { supabase } from '../supabaseClient';
 import { supabaseFetch, isNetworkError, isRpcMissing, describeError } from '../supabaseRequest';
 import { hashPassword } from '../auth';
 import { FACTOR_KEY_PREFIX, registerActiveFactors, studentSelectableFactors } from '../specialDemand';
+import { asArray } from '../arrayUtil';
 import {
   WEEKS,
   SPECIAL_FACTORS,
@@ -116,10 +117,6 @@ type WeekTab = string | 'summary' | 'history';
 type ViewMode = 'decision' | 'market';
 
 // JSON-based deep clone — avoids structuredClone dependency on legacy/mobile browsers.
-function factorKeysOf(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((k): k is string => typeof k === 'string') : [];
-}
-
 function clonePayload<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -334,8 +331,7 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
 
     setOpenWeekKeys(new Set((openRes.data as OpenWeekRow[] | null)?.map((r) => r.week_key) ?? []));
 
-    const factorRows: SpecialDemandFactor[] =
-      !factorRes.error && Array.isArray(factorRes.data) ? (factorRes.data as SpecialDemandFactor[]) : [];
+    const factorRows = factorRes.error ? [] : asArray<SpecialDemandFactor>(factorRes.data);
     registerActiveFactors(factorRows);
     setSpecialFactors(factorRows);
 
@@ -393,7 +389,7 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
               merged.channels[savedChKey] = mergedCh;
             }
           }
-          merged.specialFactors = factorKeysOf(savedWeek.specialFactors);
+          merged.specialFactors = asArray<string>(savedWeek.specialFactors);
           base.weeks[savedWeekKey] = merged;
         }
       }
@@ -533,7 +529,7 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
         const next = clonePayload(prev) as DecisionPayload;
         const wd = next.weeks[weekKey];
         if (!wd) return prev;
-        const factors = factorKeysOf(wd.specialFactors);
+        const factors = asArray<string>(wd.specialFactors);
         if (factors.includes(factorKey)) {
           wd.specialFactors = factors.filter((f) => f !== factorKey);
         } else {
@@ -840,9 +836,11 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
     activeWeek !== 'summary' && activeWeek !== 'history' ? payload.weeks[activeWeek] : null;
 
   const activeWeekMeta = WEEKS.find((w) => w.key === activeWeek);
+  const wf = asArray<SpecialDemandFactor>(specialFactors);
+  if (!Array.isArray(specialFactors)) console.warn('[SD] specialFactors 非数组', typeof specialFactors, specialFactors);
   const availableFactors: SpecialFactorMeta[] = [
     ...SPECIAL_FACTORS,
-    ...studentSelectableFactors(Array.isArray(specialFactors) ? specialFactors : [], activeWeekMeta ?? WEEKS[0]),
+    ...studentSelectableFactors(wf, activeWeekMeta ?? WEEKS[0]),
   ];
 
   async function handleChangePassword() {
@@ -1871,7 +1869,7 @@ function WeekForm({
                             disabled={disabled}
                             onToggleDay={onToggleWeekendDay}
                             onUpdatePrice={onUpdateWeekendPrice}
-                            specialFactorsActive={hasActiveSpecialFactors(factorKeysOf(weekDecision.specialFactors))}
+                            specialFactorsActive={hasActiveSpecialFactors(asArray<string>(weekDecision.specialFactors))}
                           />
                           <div className="flex items-center gap-4 flex-wrap pt-1">
                             <div className="flex items-center gap-2">
@@ -1937,7 +1935,7 @@ function WeekForm({
         )}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {availableFactors.map((f) => {
-            const checked = factorKeysOf(weekDecision.specialFactors).includes(f.key);
+            const checked = asArray<string>(weekDecision.specialFactors).includes(f.key);
             const Icon = FACTOR_ICONS[f.key] || Info;
             return (
               <button
@@ -2749,14 +2747,14 @@ function HistoryReview({ payload, cycleResult, submittedWeeks, baseParams }: His
       </div>
 
       {/* Special factors applied */}
-      {factorKeysOf(weekDecision.specialFactors).length > 0 && (
+      {asArray<string>(weekDecision.specialFactors).length > 0 && (
         <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4">
           <div className="flex items-center gap-2 mb-2">
             <Info className="w-4 h-4 text-indigo-600" />
             <span className="text-sm font-semibold text-indigo-800">本周特殊因素</span>
           </div>
           <div className="flex flex-wrap gap-2">
-            {factorKeysOf(weekDecision.specialFactors).map((fk) => {
+            {asArray<string>(weekDecision.specialFactors).map((fk) => {
               const meta = getRegisteredSpecialFactor(fk);
               if (!meta) return null;
               const Icon = FACTOR_ICONS[fk] || Info;
