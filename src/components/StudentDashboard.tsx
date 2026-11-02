@@ -329,7 +329,7 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
       return;
     }
 
-    setOpenWeekKeys(new Set((openRes.data as OpenWeekRow[] | null)?.map((r) => r.week_key) ?? []));
+    setOpenWeekKeys(new Set(asArray<OpenWeekRow>(openRes.data).map((r) => r.week_key))); // guard: asArray
 
     const factorRows = factorRes.error ? [] : asArray<SpecialDemandFactor>(factorRes.data);
     registerActiveFactors(factorRows);
@@ -404,8 +404,8 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
       lastSavedWeekDataRef.current = initWeek ? JSON.stringify(initWeek) : '';
     }
 
-    if (subRes.data) {
-      const subs = subRes.data as WeekSubmissionRow[];
+    if (Array.isArray(subRes.data)) {
+      const subs = asArray<WeekSubmissionRow>(subRes.data); // guard: asArray
       setSubmittedWeeks(new Set(subs.map((r) => r.week_key)));
       const sm = new Map<string, 'on_time' | 'late'>();
       for (const s of subs) {
@@ -450,7 +450,7 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
       // On any failure keep the current view: a refresh must never blank the page.
       if (settingsRes.error || subRes.error || openRes.error) return;
 
-      setOpenWeekKeys(new Set((openRes.data as OpenWeekRow[] | null)?.map((r) => r.week_key) ?? []));
+      setOpenWeekKeys(new Set(asArray<OpenWeekRow>(openRes.data).map((r) => r.week_key))); // guard: asArray
 
       if (settingsRes.data) {
         const s = settingsRes.data as AppSettingsRow;
@@ -460,8 +460,8 @@ export default function StudentDashboard({ group, onGroupUpdate, onLogout }: Pro
         setBenchmarkHotelClass(s.benchmark_hotel_class ?? '五星');
       }
 
-      if (subRes.data) {
-        const subs = subRes.data as WeekSubmissionRow[];
+      if (Array.isArray(subRes.data)) {
+        const subs = asArray<WeekSubmissionRow>(subRes.data); // guard: asArray
         setSubmittedWeeks(new Set(subs.map((r) => r.week_key)));
         const sm = new Map<string, 'on_time' | 'late'>();
         for (const s of subs) {
